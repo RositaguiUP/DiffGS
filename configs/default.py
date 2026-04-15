@@ -22,6 +22,12 @@ _C.outpaint = False
 # Output paths
 _C.output_path = "outputs"
 
+# NEW for pointcloud
+_C.pointcloud_path = ""
+_C.views_json_path = ""
+
+_C.v3dc_path = ""
+
 """Agent Options:
 - dummy - will load pose paths
 """

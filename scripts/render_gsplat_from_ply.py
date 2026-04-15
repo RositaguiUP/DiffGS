@@ -18,6 +18,56 @@ from nerfstudio.cameras.cameras import Cameras, CameraType
 from realmdreamer.dummy.gs_model_render import (GaussianSplatting,
                                                 GaussianSplattingPCDModel)
 
+# NEW
+def load_poses_from_views_json(json_path, fp):
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    poses = []
+
+    transform = np.array([
+        [1, 0, 0, 0],
+        [0, -1, 0, 0],
+        [0, 0, -1, 0],
+        [0, 0, 0, 1]
+    ], dtype=np.float32)
+
+    for frame in data:
+        if frame.get("status") != "SUCCESS":
+            continue
+        
+        pose = np.array(frame["camera_pose"], dtype=np.float32)
+        
+        if pose.shape != (4, 4):
+            continue
+        
+        
+        id =  frame.get("id")
+        print(f'ID: {id}')
+
+        
+        # print(f'Pose - org: {pose}')
+        # # pose = pose.T
+        
+        # 1. w2c → c2w
+        pose = np.linalg.inv(pose)
+        # print(f'Pose - inv: {pose}')
+            
+        floorplan_to_scan = fp.floorplan_to_mesh @ fp.mesh_to_scan
+        # floorplan_to_scan = floorplan_to_mesh @ mesh_to_scan
+        pose = floorplan_to_scan @ pose
+            
+
+        # # 2. OpenCV → OpenGL
+        # pose = pose @ transform
+        pose = transform @ pose
+        # print(f'Pose - transf: {pose}')
+
+        poses.append(pose)
+
+    print(f"Loaded {len(poses)} valid poses")
+    return poses
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -53,13 +103,16 @@ if __name__ == "__main__":
     # Load trajectory
     traj = json.load(open(args.traj, "r"))
 
-    poses = np.array(
-        [
-            np.fromstring(frame["matrix"].strip("[]"), sep=",").reshape(4, 4).T
-            for frame in traj["keyframes"]
-        ]
-    )
-
+    # poses = np.array(
+    #     [
+    #         np.fromstring(frame["matrix"].strip("[]"), sep=",").reshape(4, 4).T
+    #         for frame in traj["keyframes"]
+    #     ]
+    # )
+    
+    
+    poses = load_poses_from_views_json(args.traj)
+    
     # Render
     for i, pose in tqdm(enumerate(poses)):
 

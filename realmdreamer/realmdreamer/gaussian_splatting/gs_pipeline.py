@@ -181,6 +181,7 @@ class GaussianSplattingPipeline(VanillaPipeline):
 
                 inpainted_image, one_step = self.model.guidance.sample(
                     rgb=model_outputs["rgb"],  # Shape (B, H, W, 3)
+                    ref_rgb=batch["image"],  # NEW: Your real indoor scan (low quality/blurry) - Shape (B, H, W, 3)
                     prompt=self.config.prompt,
                     mask=batch["inpainting_mask"].to(self.device),  # Shape (B, H, W, 1)
                     strength=(

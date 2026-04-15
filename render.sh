@@ -11,10 +11,16 @@ scene_name=$(basename "$(dirname "$(dirname "$(dirname "$1")")")")
 video_name=$(basename "$3")
 
 # Create the output path
-output_path="renders/$scene_name/$video_name.mp4"
+# output_path="renders/$scene_name/$video_name.mp4"
+# output_path="/home/rosita/tests/diff/realmDreamer/realmdreamer/renders/$scene_name/$video_name.mp4"
+output_path="/home/rosita/tests/diff/realmDreamer/realmdreamer/renders/$scene_name/$video_name"
+output_file="/home/rosita/tests/diff/realmDreamer/realmdreamer/renders/$scene_name/$video_name.png"
+
+mkdir -p "$output_path"
 
 # Create the command
-command="ns-render camera-path --load-config $1 --camera-path-filename $2 --output-format video --output-path $output_path --rendered-output-names rgb --colormap-options.normalize True --colormap-options.specified_normalize False"
+# command="ns-render camera-path --load-config $1 --camera-path-filename $2 --output-format video --output-path $output_path --rendered-output-names rgb --colormap-options.normalize True --colormap-options.specified_normalize False"
+command="ns-render camera-path --load-config $1 --camera-path-filename $2 --output-format images --output-path $output_file --rendered-output-names rgb --colormap-options.normalize True --colormap-options.specified_normalize False"
 
 # Print and execute the command
 echo "Running command:"

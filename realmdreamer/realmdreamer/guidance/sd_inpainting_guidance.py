@@ -25,7 +25,8 @@ from utils.diffusers import custom_step
 
 
 class SDInpaintingConfig:
-    pretrained_model_name_or_path: str = "stabilityai/stable-diffusion-2-inpainting"
+    # pretrained_model_name_or_path: str = "stabilityai/stable-diffusion-2-inpainting"
+    pretrained_model_name_or_path: str = "sd2-community/stable-diffusion-2-inpainting"
     enable_memory_efficient_attention: bool = True
     enable_channels_last_format: bool = False
     guidance_scale: float = 7.5
@@ -155,6 +156,7 @@ class StableDiffusionInpaintingGuidance(nn.Module):
     def multi_step(
         self,
         rgb,  # Float[Tensor, "B H W C"],
+        ref_rgb, # NEW: Your real indoor scan (low quality/blurry)
         og_rgb,  # Float[Tensor, "B H W C"],
         mask,  # Bool[Tensor, "B H W 1"],
         prompt: str,
@@ -194,6 +196,7 @@ class StableDiffusionInpaintingGuidance(nn.Module):
         with torch.no_grad():
             inpainted_image, _ = self.sample(
                 rgb=rgb,
+                ref_rgb=ref_rgb,
                 mask=mask,
                 prompt=prompt,
                 strength=t / self.num_train_timesteps,
@@ -338,6 +341,7 @@ class StableDiffusionInpaintingGuidance(nn.Module):
     def sample(
         self,
         rgb,  # Float[Tensor, "B H W C"],
+        ref_rgb, # NEW: Your real indoor scan (low quality/blurry)
         mask,  # Bool[Tensor, "B H W 1"],
         prompt: str,
         strength: float,
@@ -423,10 +427,27 @@ class StableDiffusionInpaintingGuidance(nn.Module):
             fixed_inference_count=fixed_inference_count,
         )
 
+        # ORIGINAL
+        # if not self.cfg.invert:
+        #     # Add noise corresponding to a strength to the latent
+        #     noise = torch.randn_like(latents)
+        #     latents = self.scheduler.add_noise(latents, noise, timesteps[0])
+        # Assuming 'rgb' contains your low-quality reference scan
         if not self.cfg.invert:
-            # Add noise corresponding to a strength to the latent
-            noise = torch.randn_like(latents)
-            latents = self.scheduler.add_noise(latents, noise, timesteps[0])
+            # 1. Encode your low-quality reference RGB into latents
+            reference_rgb_BCHW = ref_rgb.permute(0, 3, 1, 2)
+            reference_latents = self.encode_images(reference_rgb_BCHW)
+            
+            # 2. Add some noise to the reference, but NOT full noise.
+            # We want to preserve the rough structure and colors (e.g., strength=0.7)
+            noise = torch.randn_like(reference_latents)
+            
+            # Make sure your config sets a max_step_percent that corresponds to
+            # the 'strength' you want (e.g., 0.7 max noise).
+            
+            # We ignore the standard 'latents' (which are from the student splats)
+            # and use our reference latents instead.
+            latents = self.scheduler.add_noise(reference_latents, noise, timesteps[0])
         else:
             latents = self.invert(
                 rgb_BCHW,
@@ -438,9 +459,10 @@ class StableDiffusionInpaintingGuidance(nn.Module):
                 timesteps=timesteps,
             )
 
-        if strength == 1.0:
-            noise = torch.randn_like(latents)
-            latents = noise  # If strength is one, start from pure noise
+        # ORIGINAL
+        # if strength == 1.0:
+        #     noise = torch.randn_like(latents)
+        #     latents = noise  # If strength is one, start from pure noise
 
         # Get timesteps required for denoising
         one_step_pred_0 = None
