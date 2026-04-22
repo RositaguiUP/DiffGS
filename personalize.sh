@@ -21,9 +21,10 @@ fi
 class_prompt=$prompt
 instance_prompt="${prompt}, in the style of <token>"
 
-model_name="stabilityai/stable-diffusion-2-1-base"
+# model_name="stabilityai/stable-diffusion-2-1-base"
+model_name="sd2-community/stable-diffusion-2-1"
 
-rgb_dir="${scene_path}/input_rgb"
+rgb_dir="${scene_path}/rgb"
 output_dir="${scene_path}/dreambooth"
 
 python scripts/train_dreambooth.py \
@@ -43,4 +44,4 @@ python scripts/train_dreambooth.py \
   --checkpointing_steps=500 \
   --validation_steps=40 \
   --max_train_steps=200 \
-  --use_8bit_adam
+  # --use_8bit_adam

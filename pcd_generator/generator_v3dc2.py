@@ -2,20 +2,20 @@ import os
 import json
 import numpy as np
 import cv2
+import torch
 from tqdm import tqdm
 from PIL import Image
 import matplotlib.pyplot as plt
-from pathlib import Path
 
 from .utils.v3dc_io import read_v3dc_sliced
+from .depth_estimators import setup_depth  # <-- you need this
+
 
 class GeneratorV3DC:
 
-    def __init__(self, cfg, v3dc_path, mesh_depth_path):
+    def __init__(self, cfg, v3dc_path):
         self.cfg = cfg
         self.v3dc_path = v3dc_path
-        self.mesh_depth_path = mesh_depth_path
-
         self.outputs = []
 
         print(f"Loading V3DC from {v3dc_path}")
@@ -30,88 +30,112 @@ class GeneratorV3DC:
         )
 
         print(f"Loaded {len(self.views)} frames")
-        
+
+        # ✅ NEW: depth estimator
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.depth_estimator = setup_depth(self.cfg.depth_estimator)
+
     def is_blurry(self, image, threshold=100.0):
-        """
-        Returns True if image is blurry. Variance of Laplacian
-        threshold: lower = stricter (more images removed)
-        """
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
         return laplacian_var < threshold, laplacian_var
 
-    def process_views(self, combine_depths_for_mask=True):
-        """
-        Extract RGB, depth, mask, and pose from V3DC
-        """
+    def process_views(self):
 
         for i, view in enumerate(tqdm(self.views)):
             rgb = view["img"]
-            scan_depth = view["depth"].astype(np.float32) / 1000.0 # Meters
-            pose = view["viewmat"]  # camera pose
+            depth_scan = view["depth"]
+            pose = view["viewmat"]
 
-            if rgb is None or scan_depth is None:
+            if rgb is None:
                 continue
-            
-            blurry, score = self.is_blurry(rgb, threshold=100.0)
 
+            blurry, score = self.is_blurry(rgb)
             if blurry:
                 print(f"Skipping blurry frame {i}, score={score:.2f}")
                 continue
-            
-            # 1. Load the corresponding Mesh Depth (rendered previously)
-            mesh_depth = None
-            if self.mesh_depth_path:
-                # Assuming index-based naming from your previous script
-                npy_file = Path(self.mesh_depth_path) / f"{i}.npy"
-                if npy_file.exists():
-                    mesh_depth = np.load(npy_file) # Already in meters
-                else:
-                    continue
-            
-            # Step 1: resize depth to RGB resolution FIRST
-            scan_depth = cv2.resize(
-                scan_depth,
-                (rgb.shape[1], rgb.shape[0]),  # (W, H)
-                interpolation=cv2.INTER_NEAREST
-            )
 
-            # Step 2: now shapes match
+            # -------------------------
+            # Resize scan depth to RGB
+            # -------------------------
+            if depth_scan is not None:
+                depth_scan = cv2.resize(
+                    depth_scan,
+                    (rgb.shape[1], rgb.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                depth_scan = depth_scan.astype(np.float32) / 1000.0  # meters
+            else:
+                depth_scan = np.zeros(rgb.shape[:2], dtype=np.float32)
+
+            # -------------------------
+            # VALID DEPTH MASK (IMPORTANT)
+            # -------------------------
+            valid_scan = (depth_scan > 0.0) & (depth_scan < 10.0)
+
+            # -------------------------
+            # MONOCULAR DEPTH (FILL GAPS)
+            # -------------------------
+            rgb = np.ascontiguousarray(rgb)
+
+            rgb_tensor = (
+                torch.from_numpy(rgb)
+                .permute(2, 0, 1)
+                .float()
+                .unsqueeze(0)
+                / 255.0
+            )
+            
+
+            with torch.no_grad():
+                depth_pred = self.depth_estimator(rgb_tensor)
+
+            depth_pred = depth_pred[0, 0].cpu().numpy()
+
+            # Normalize predicted depth
+            depth_pred = depth_pred / (depth_pred.max() + 1e-6)
+
+            # -------------------------
+            # COMBINE DEPTHS (KEY STEP)
+            # -------------------------
+            depth = np.where(valid_scan, depth_scan, depth_pred)
+
+            # -------------------------
+            # CROP CENTER
+            # -------------------------
             H, W = rgb.shape[:2]
             min_dim = min(H, W)
 
-            start_x = (W - min_dim) // 2
-            start_y = (H - min_dim) // 2
+            sx = (W - min_dim) // 2
+            sy = (H - min_dim) // 2
 
-            # Step 3: crop BOTH
-            rgb = rgb[start_y:start_y+min_dim, start_x:start_x+min_dim]
-            scan_depth = scan_depth[start_y:start_y+min_dim, start_x:start_x+min_dim]
+            rgb = rgb[sy:sy+min_dim, sx:sx+min_dim]
+            depth = depth[sy:sy+min_dim, sx:sx+min_dim]
+            valid_scan = valid_scan[sy:sy+min_dim, sx:sx+min_dim]
 
-            # Step 4: resize to model input
+            # -------------------------
+            # RESIZE TO MODEL SIZE
+            # -------------------------
             rgb = cv2.resize(rgb, (self.cfg.img_size, self.cfg.img_size))
-            scan_depth = cv2.resize(scan_depth, (self.cfg.img_size, self.cfg.img_size), interpolation=cv2.INTER_NEAREST)
-            
-            
-            # 2. Create Masks
-            # Mask areas where the mesh is "Empty" (0 or Inf)
-            mask_mesh_gap = (mesh_depth <= 0) if mesh_depth is not None else np.zeros_like(scan_depth)
-            mask_scan_gap = (scan_depth <= 0)
-            
-            if combine_depths_for_mask and mesh_depth is not None:
-            # Combine: Inpaint if Mesh is missing OR Scan is missing
-                final_mask = (mask_mesh_gap | mask_scan_gap).astype(np.uint8)
-            elif mesh_depth is not None:
-                # Only inpaint true Mesh holes
-                final_mask = mask_mesh_gap.astype(np.uint8)
-            else:
-                # Fallback to scan only
-                final_mask = mask_scan_gap.astype(np.uint8)
-                            
-            # THEN convert to torch format
-            rgb = np.transpose(rgb, (2, 0, 1))[None]      # (1,3,H,W)
-            depth = scan_depth[None, None]                     # (1,1,H,W)
-            mask = final_mask[None, None]               # (1,1,H,W)
-            
+            depth = cv2.resize(depth, (self.cfg.img_size, self.cfg.img_size))
+            valid_scan = cv2.resize(
+                valid_scan.astype(np.uint8),
+                (self.cfg.img_size, self.cfg.img_size),
+                interpolation=cv2.INTER_NEAREST
+            )
+
+            # -------------------------
+            # FINAL MASK (CRITICAL FIX)
+            # -------------------------
+            # Mask ONLY where NO reliable geometry
+            mask = (~valid_scan).astype(np.uint8)
+
+            # -------------------------
+            # FORMAT FOR TRAINING
+            # -------------------------
+            rgb = np.transpose(rgb, (2, 0, 1))[None]
+            depth = depth[None, None]
+            mask = mask[None, None]
 
             self.outputs.append({
                 "pose_index": i,
@@ -124,9 +148,6 @@ class GeneratorV3DC:
         print(f"Processed {len(self.outputs)} frames")
 
     def export_to_dataset(self):
-        """
-        Save dataset in Nerfstudio format
-        """
 
         output_path = os.path.join(self.cfg.output_path, self.cfg.scene_name)
         os.makedirs(output_path, exist_ok=True)
@@ -146,11 +167,10 @@ class GeneratorV3DC:
             idx = out["pose_index"]
             pose = out["pose"]
 
-            rgb = out["rgb"][0].transpose(1, 2, 0)  # CHW → HWC
+            rgb = out["rgb"][0].transpose(1, 2, 0)
             depth = out["depth"][0, 0]
             mask = 1 - out["mask"][0, 0].astype(np.uint8)
 
-            # Paths
             rgb_path = os.path.join(output_path, "rgb", f"{idx}.png")
             depth_path = os.path.join(output_path, "depth", f"{idx}.npy")
             mask_path = os.path.join(output_path, "mask", f"{idx}.png")
@@ -158,23 +178,18 @@ class GeneratorV3DC:
             for path in [rgb_path, depth_path, mask_path]:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
 
-            # Save RGB
             Image.fromarray(rgb.astype(np.uint8)).save(rgb_path)
-
-            # Save depth
             np.save(depth_path, depth)
 
-            # Optional depth visualization
+            # Depth visualization
             depth_vis = depth / (depth.max() + 1e-6)
             plt.imshow(depth_vis, cmap="turbo")
             plt.colorbar()
             plt.savefig(depth_path.replace(".npy", ".png"))
             plt.close()
 
-            # Save mask
             Image.fromarray((mask * 255).astype(np.uint8)).save(mask_path)
 
-            # Convert pose to OpenGL (same as your original)
             transform = np.array([
                 [1, 0, 0, 0],
                 [0, -1, 0, 0],
@@ -193,7 +208,6 @@ class GeneratorV3DC:
                 "transform_matrix": pose_gl_c2w.tolist()
             })
 
-        # Save JSON
         with open(os.path.join(output_path, "init_transforms.json"), "w") as f:
             json.dump(nerfstudio_json, f, indent=4)
 

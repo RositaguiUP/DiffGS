@@ -11,9 +11,9 @@ from .extern.GeoWizard.geowizard.models.geowizard_pipeline import (
     DepthNormalEstimationPipeline,
 )
 
-from utils.depth import align_depths, blend_depths
+from realmdreamer.utils.depth import align_depths, blend_depths
 
-from utils.bilateral_filter import bilateral_filter
+from realmdreamer.utils.bilateral_filter import bilateral_filter
 from torchvision.utils import save_image
 from litellm import completion
 

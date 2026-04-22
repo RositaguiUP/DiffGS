@@ -10,6 +10,7 @@ from cprint import cprint
 
 from configs import get_cfg_defaults
 from pcd_generator.generator_v3dc import GeneratorV3DC
+# from pcd_generator.generator_v3dc2 import GeneratorV3DC
 
 def main(cfg):
     cprint.info("Starting Experiment: {}".format(cfg.project_name))
@@ -22,8 +23,10 @@ def main(cfg):
     if not Path(v3dc_path).exists():
         raise FileNotFoundError(f"Point cloud file not found: {v3dc_path}")
     
+    mesh_depth_path = Path("/home/rosita/tests/rendering/mesh_rendering/outputs/original_sqr/depth")
+    
     print("[bold blue]Initializing Generator from V3DC...[/bold blue]")
-    generator = GeneratorV3DC(cfg, v3dc_path=v3dc_path)
+    generator = GeneratorV3DC(cfg, v3dc_path=v3dc_path, mesh_depth_path=mesh_depth_path)
     
     print("[bold blue]Processing views...[/bold blue]")
     generator.process_views()

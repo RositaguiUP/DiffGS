@@ -205,7 +205,7 @@ def v3dc_frame_to_view(
         confidence = np.squeeze(frame.confidence())
 
         # Only keep confident depth
-        depth[confidence < 2] = 0
+        # depth[confidence < 0.05] = 0
 
         if orient_img:
             if info['orientation'] in {'landscape', 'landscapeRight'}:

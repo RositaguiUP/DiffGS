@@ -850,33 +850,13 @@ class GaussianSplatting(Model):
                     mode="nearest",
                 )
                 rendered_depth_bhwc = outputs["depth"].permute(0, 2, 3, 1)  # B C H W -> B H W C
-
             
             if (~batch["inpainting_mask"]).sum() > 0:  # If the mask is all 1s, don't compute the depth loss
-                # === GT DEPTH LOSS (known regions) ===
-                known_mask = ~batch["inpainting_mask"]
-
-                depth_gt = batch["depth_image"]
-                depth_render = rendered_depth_bhwc
-
-                mask_depth = (depth_gt > 0) & known_mask
-
-                if mask_depth.sum() > 0:
-                    depth_l2 = F.mse_loss(
-                        depth_render[mask_depth],
-                        depth_gt[mask_depth],
-                        reduction="mean"
-                    )
-                else:
-                    depth_l2 = torch.tensor(0.0, device=self.device)
-                
-                loss_dict["loss_depth_gt"] = self.config.lambda_depth * depth_l2
-                    
-                # loss_dict["loss_depth"] = self.config.lambda_depth * self.masked_depth_loss(
-                #     rendered_depth_bhwc,
-                #     batch["depth_image"].to(self.device),
-                #     batch["inpainting_mask"],
-                # )
+                loss_dict["loss_depth"] = self.config.lambda_depth * self.masked_depth_loss(
+                    rendered_depth_bhwc,
+                    batch["depth_image"].to(self.device),
+                    batch["inpainting_mask"],
+                )
 
             # Opaqueness Loss
             clamped_opacity = torch.clamp(self.gaussian_model.get_opacity, min=1e-5, max=1.0 - 1e-5)

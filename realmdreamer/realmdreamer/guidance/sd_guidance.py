@@ -24,7 +24,8 @@ from utils.diffusers import custom_step
 
 
 class SDConfig:
-    pretrained_model_name_or_path: str = "stabilityai/stable-diffusion-2-1-base"
+    # pretrained_model_name_or_path: str = "stabilityai/stable-diffusion-2-1-base"
+    pretrained_model_name_or_path: str = "sd2-community/stable-diffusion-2-1"
     enable_memory_efficient_attention: bool = True
     enable_sequential_cpu_offload: bool = False
     enable_attention_slicing: bool = False

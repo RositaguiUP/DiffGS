@@ -7,9 +7,9 @@ from .extern.marigold.marigold_pipeline import MarigoldPipeline
 
 from .base import DepthEstimator
 
-from utils.depth import align_depths, blend_depths
+from realmdreamer.utils.depth import align_depths, blend_depths
 
-from utils.bilateral_filter import bilateral_filter
+from realmdreamer.utils.bilateral_filter import bilateral_filter
 
 import kornia
 

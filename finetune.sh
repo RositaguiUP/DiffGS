@@ -22,7 +22,7 @@ echo "Finetuning for scene: ${scene_name}"
 
 scene_folder_path="outputs/${scene_name}"
 
-ckpt_name="2025-01-26_053355"
+ckpt_name="2026-04-13_192240"
 
 command="ns-train realmdreamer-f --data "${scene_folder_path%/}" \
 --project_name "RealmDreamer_Finetune" \

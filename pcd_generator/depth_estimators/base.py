@@ -5,7 +5,7 @@ import torch
 import sys
 
 sys.path.append("/mnt/data/temp/Portal")
-from utils.depth import align_depths, blend_depths
+from realmdreamer.utils.depth import align_depths, blend_depths
 
 
 class DepthEstimator(ABC):

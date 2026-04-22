@@ -29,7 +29,8 @@ from diffusers.models.attention_processor import (
     AttnAddedKVProcessor,
     AttnAddedKVProcessor2_0,
 )
-from diffusers.models.dual_transformer_2d import DualTransformer2DModel
+# from diffusers.models.dual_transformer_2d import DualTransformer2DModel
+from diffusers.models.transformers.dual_transformer_2d import DualTransformer2DModel
 from diffusers.models.normalization import AdaGroupNorm
 from diffusers.models.resnet import (
     Downsample2D,
