@@ -7,4 +7,4 @@ aux_prompt: ''
 depth_estimator:
   mode: "indoor"
 
-v3dc_path: '/shared/3du_data/data/2025/10/6V/6VSV7_695/process/floor_2/video.refine.v3dc'
+v3dc_path: '/shared/3du_data/data/2025/10/6V/6VSV7_695/process/floor_0/video.refine.v3dc'

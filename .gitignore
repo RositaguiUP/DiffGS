@@ -8,7 +8,9 @@ renders/*
 wandb/*
 *.zip
 *.mp4
+*.pth
 outputs/*
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

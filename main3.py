@@ -23,7 +23,7 @@ def main(cfg):
     if not Path(v3dc_path).exists():
         raise FileNotFoundError(f"Point cloud file not found: {v3dc_path}")
     
-    mesh_depth_path = Path("/home/rosita/tests/rendering/mesh_rendering/outputs/original_sqr/depth")
+    mesh_depth_path = Path("/home/rosita/tests/rendering/mesh_rendering/outputs/f1/depth")
     
     print("[bold blue]Initializing Generator from V3DC...[/bold blue]")
     generator = GeneratorV3DC(cfg, v3dc_path=v3dc_path, mesh_depth_path=mesh_depth_path)

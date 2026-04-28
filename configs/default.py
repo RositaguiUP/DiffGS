@@ -27,6 +27,8 @@ _C.pointcloud_path = ""
 _C.views_json_path = ""
 
 _C.v3dc_path = ""
+_C.use_sharpness = True
+_C.sharpness_factor = 4.0
 
 """Agent Options:
 - dummy - will load pose paths
