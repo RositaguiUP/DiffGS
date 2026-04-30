@@ -1,0 +1,11 @@
+scene_name: 'v15'
+base_img_path: ''
+debug: true
+
+prompt: 'A highly detailed photorealistic render of a modern apartment, oak wood floors, minimalist walls, natural cinematic lighting, 4k image'
+aux_prompt: ''
+depth_estimator:
+  mode: "indoor"
+
+env_id: '2F5Z7_007'
+floor_number: '0'

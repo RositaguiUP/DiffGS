@@ -22,13 +22,13 @@ _C.outpaint = False
 # Output paths
 _C.output_path = "outputs"
 
-# NEW for pointcloud
-_C.pointcloud_path = ""
-_C.views_json_path = ""
-
-_C.v3dc_path = ""
-_C.use_sharpness = True
-_C.sharpness_factor = 4.0
+# NEW for inputs generator
+_C.env_id = ""
+_C.floor_number = 0
+_C.dist_thresh = 0.15
+_C.rot_thresh = 10.0
+_C.blur_thresh = 15.0
+_C.step = 1
 
 """Agent Options:
 - dummy - will load pose paths

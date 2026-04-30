@@ -18,8 +18,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 # from basicsr.models.archs.arch_util import LayerNorm2d
 # from basicsr.models.archs.local_arch import Local_Base
-from utils.arch_util import LayerNorm2d
-from utils.local_arch import Local_Base
+from inputs_generator.utils.arch_util import LayerNorm2d
+from inputs_generator.utils.local_arch import Local_Base
 
 class SimpleGate(nn.Module):
     def forward(self, x):

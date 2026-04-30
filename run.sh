@@ -41,9 +41,9 @@ command="ns-train realmdreamer --data "${scene_folder_path%/}" \
 --pipeline.model.use_sigmoid True \
 --pipeline.model.average_colors False \
 --pipeline.model.lambda_rgb 10000.0 \
---pipeline.model.lambda_depth 5.0 \
+--pipeline.model.lambda_depth 0.0 \
 --pipeline.model.lambda_sds 0.1 \
---pipeline.model.lambda_opaque 0.1 \
+--pipeline.model.lambda_opaque 0.0 \
 --pipeline.model.lambda_one_step 0.01 \
 --pipeline.model.lambda_one_step_perceptual 100 \
 --pipeline.model.lambda_input_constraint_l2 1000 \
@@ -53,13 +53,13 @@ command="ns-train realmdreamer --data "${scene_folder_path%/}" \
 --pipeline.model.lambda_depth_sds 1000 \
 --pipeline.input_view_constraint False \
 --pipeline.input_view_depth_constraint False \
---pipeline.model.max_step_percent 0.7 \
+--pipeline.model.max_step_percent 0.98 \
 --pipeline.model.min_step_percent 0.2 \
 --pipeline.model.anneal False \
 --pipeline.model.prolific_anneal False \
 --pipeline.model.ignore_mask False \
 --pipeline.model.img_guidance_scale 1.8 \
---pipeline.model.guidance_scale 5 \
+--pipeline.model.guidance_scale 7.5 \
 --optimizers.xyz.optimizer.lr 0.01 \
 --optimizers.f-dc.optimizer.lr 0.001 \
 --optimizers.opacity.optimizer.lr 0.01 \

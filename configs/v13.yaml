@@ -1,0 +1,10 @@
+scene_name: 'v13'
+base_img_path: ''
+debug: true
+
+prompt: 'A highly detailed photorealistic render of a new appartment, kitchen, corridor, livingroom, with windows with views to natural landscapes, 4k image'
+aux_prompt: ''
+depth_estimator:
+  mode: "indoor"
+
+v3dc_path: '/shared/3du_data/data/2025/10/6V/6VSV7_695/process/floor_0/video.refine.v3dc'

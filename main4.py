@@ -9,32 +9,19 @@ import time
 from cprint import cprint
 
 from configs import get_cfg_defaults
-from pcd_generator.generator_v3dc import GeneratorV3DC
-# from pcd_generator.generator_v3dc2 import GeneratorV3DC
+from inputs_generator.generator import Generator
 
 def main(cfg):
     cprint.info("Starting Experiment: {}".format(cfg.project_name))
     cprint.info("Starting at: {}".format(time.ctime()))
 
     # Paths from config
-    v3dc_path = cfg.v3dc_path
-    output_path = cfg.output_path
-
-    if not Path(v3dc_path).exists():
-        raise FileNotFoundError(f"Point cloud file not found: {v3dc_path}")
+    output_path = Path(cfg.output_path) / cfg.scene_name
     
-    mesh_depth_path = Path("/home/rosita/tests/rendering/mesh_rendering/outputs/f1/depth")
+    print("[bold blue]Initializing Generator...[/bold blue]")
+    generator = Generator(cfg.env_id, cfg.floor_number, output_path)
     
-    print("[bold blue]Initializing Generator from V3DC...[/bold blue]")
-    generator = GeneratorV3DC(cfg, v3dc_path=v3dc_path, mesh_depth_path=mesh_depth_path)
-    
-    print("[bold blue]Processing views...[/bold blue]")
-    generator.process_views()
-
-    print("[bold blue]Exporting dataset...[/bold blue]")
-    generator.export_to_dataset()
-
-    print(f"[bold green]Done! Dataset exported to {output_path}[/bold green]")
+    generator.run(cfg.img_size, cfg.dist_thresh, cfg.rot_thresh, cfg.blur_thresh, cfg.step)
 
 if __name__ == "__main__":
     args = argparse.ArgumentParser()
