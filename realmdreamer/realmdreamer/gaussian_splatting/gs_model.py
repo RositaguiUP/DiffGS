@@ -87,6 +87,12 @@ class GaussianSplattingModelConfig(ModelConfig):
 
     gaussian_model: GaussianSplattingFieldConfig = GaussianSplattingFieldConfig()
     """Config for the Gaussian model."""
+    
+    deblur_enabled: bool = False
+    """Whether to enable per-image learnable deblurring kernels."""
+    
+    deblur_kernel_size: int = 15
+    """Size of the square blur kernel."""
 
     background_color: str = "white"
     """Background color for the rendered images. Either "black" or "white"."""
@@ -277,6 +283,19 @@ class GaussianSplatting(Model):
 
         self.opacity_modifier = ViewerSlider(name="Opacity Slider", default_value=0.5, min_value=0.0, max_value=1.0)
         self.scale_modifier = ViewerSlider(name="Scale Slider", default_value=1.0, min_value=0.0, max_value=1.0)
+        
+        if self.config.deblur_enabled:
+            # num_train_data is available from the super().__init__
+            self.blur_kernels = nn.Parameter(
+                torch.zeros((num_train_data, 1, self.config.deblur_kernel_size, self.config.deblur_kernel_size))
+            )
+            # Initialize as an identity kernel (sharp)
+            center = self.config.deblur_kernel_size // 2
+            # self.blur_kernels.data[:, 0, center, center] = 1.0
+            with torch.no_grad():
+                self.blur_kernels.fill_(0.0)
+                self.blur_kernels[:, :, center, center] = 1.0
+        
 
     def setup_diffusion(self, dreambooth_path=None):
 
@@ -516,6 +535,9 @@ class GaussianSplatting(Model):
         if self.config.guidance == "vsd":
             print("Adding guidance parameters to param_groups")
             param_groups["guidance"] = list(self.guidance.parameters())
+            
+        if self.config.deblur_enabled:
+            param_groups["deblur_kernels"] = [self.blur_kernels]
 
         return param_groups
 
@@ -697,7 +719,46 @@ class GaussianSplatting(Model):
         rendered_rgb_bchw = outputs["rgb"]
         rendered_depth_bhwc = outputs["depth"].permute(0, 2, 3, 1)
         rendered_depth_bchw = outputs["depth"]
+        
+        if self.config.deblur_enabled and step_ratio > 0.13: # Only start blurring after the scene has basic structure
+            # 1. Get the image index and the corresponding kernel
+            img_idx = batch["image_idx"] 
+            # Use the full batch of kernels
+            raw_kernels = self.blur_kernels[img_idx] # Shape: [B, 1, 15, 15]
 
+            # 2. Normalize the kernels (CRITICAL for color/brightness stability)
+            # We use abs to ensure positive weights and add epsilon to prevent division by zero
+            curr_kernels = torch.abs(raw_kernels) 
+            curr_kernels = curr_kernels / (curr_kernels.sum(dim=(2, 3), keepdim=True) + 1e-8)
+            
+            # 3. Prepare kernel for RGB depthwise convolution
+            # Instead of .repeat on the whole batch, we need to repeat the channel dim
+            # Shape change: [B, 1, 15, 15] -> [B*3, 1, 15, 15] to match groups=3 in a batch
+            B = rendered_rgb_bchw.shape[0]
+            kernel_rgb = curr_kernels.repeat_interleave(3, dim=0) 
+
+            # 4. Apply blur to the RENDERED image
+            p = self.config.deblur_kernel_size // 2
+            rendered_rgb_bchw = F.conv2d(
+                rendered_rgb_bchw, 
+                weight=kernel_rgb, 
+                padding=p, 
+                groups=3 * B # Use 3 * Batch for depthwise across the whole batch
+            )
+            
+            # 5. Update bhwc for loss logic
+            rendered_rgb_bhwc = rendered_rgb_bchw.permute(0, 2, 3, 1)
+            
+            # 6. Improved Regularization
+            # Sparsity (L1) encourages a clean, sharp kernel (delta function)
+            # TV loss encourages the kernel to be locally smooth (no salt-and-pepper noise)
+            loss_dict["loss_kernel_reg"] = torch.mean(torch.abs(raw_kernels)) * 0.001
+            
+            # Optional: Center-weighting (Total Variation) to keep the kernel focused
+            diff_h = torch.abs(curr_kernels[:, :, 1:, :] - curr_kernels[:, :, :-1, :]).mean()
+            diff_w = torch.abs(curr_kernels[:, :, :, 1:] - curr_kernels[:, :, :, :-1]).mean()
+            loss_dict["loss_kernel_tv"] = (diff_h + diff_w) * 0.01
+        
         for key in ["rgb", "depth"]:
 
             outputs[key] = outputs[key].permute(0, 2, 3, 1)

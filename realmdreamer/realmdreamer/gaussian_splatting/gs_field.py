@@ -368,6 +368,10 @@ class GaussianSplattingField(Field):
                 )
                 optimizable_tensors[param_name] = group["params"][0]
 
+        for param_name in optimizers.keys():
+            if param_name not in optimizable_tensors:
+                optimizable_tensors[param_name] = optimizers[param_name].param_groups[0]["params"][0]
+        
         return optimizable_tensors
 
     def densification_postfix(
@@ -411,7 +415,7 @@ class GaussianSplattingField(Field):
         optimizable_tensors = {}
         for param_name in optimizers.keys():
 
-            if param_name in ["guidance"]:
+            if param_name in ["guidance", "deblur_kernels"]:
                 continue
 
             group = optimizers[param_name].param_groups[0]
@@ -429,6 +433,8 @@ class GaussianSplattingField(Field):
             else:
                 group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
                 optimizable_tensors[param_name] = group["params"][0]
+                
+            
         return optimizable_tensors
 
     def prune_points(self, mask, optimizers):

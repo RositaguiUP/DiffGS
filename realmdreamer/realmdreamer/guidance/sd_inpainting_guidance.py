@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from cprint import *
 from diffusers import (DDIMInverseScheduler, DDIMScheduler, DDPMScheduler,
-                       StableDiffusionInpaintPipeline)
+                       StableDiffusionInpaintPipeline, StableDiffusionImg2ImgPipeline)
 from diffusers.utils.import_utils import is_xformers_available
 from packaging import version
 from torch import Tensor
@@ -26,7 +26,8 @@ from utils.diffusers import custom_step
 
 class SDInpaintingConfig:
     # pretrained_model_name_or_path: str = "stabilityai/stable-diffusion-2-inpainting"
-    pretrained_model_name_or_path: str = "sd2-community/stable-diffusion-2-inpainting"
+    # pretrained_model_name_or_path: str = "sd2-community/stable-diffusion-2-inpainting"
+    pretrained_model_name_or_path: str = "sd2-community/stable-diffusion-2-1"
     enable_memory_efficient_attention: bool = True
     enable_channels_last_format: bool = False
     guidance_scale: float = 7.5
@@ -98,7 +99,11 @@ class StableDiffusionInpaintingGuidance(nn.Module):
             "requires_safety_checker": False,
             "torch_dtype": self.weights_dtype,
         }
-        self.pipe = StableDiffusionInpaintPipeline.from_pretrained(
+        # self.pipe = StableDiffusionInpaintPipeline.from_pretrained(
+        #     self.cfg.pretrained_model_name_or_path,
+        #     **pipe_kwargs,
+        # ).to(self.device)
+        self.pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
             self.cfg.pretrained_model_name_or_path,
             **pipe_kwargs,
         ).to(self.device)
@@ -165,6 +170,8 @@ class StableDiffusionInpaintingGuidance(nn.Module):
         mask_grad=True,
         **kwargs,
     ):
+        # OVERRIDE: Force the mask to be all ones (Global Enhancement)
+        mask = torch.ones_like(mask)
 
         batch_size = rgb.shape[0]
 
@@ -197,7 +204,7 @@ class StableDiffusionInpaintingGuidance(nn.Module):
             inpainted_image, _ = self.sample(
                 rgb=rgb,
                 ref_rgb=ref_rgb,
-                mask=mask,
+                mask=None,
                 prompt=prompt,
                 strength=t / self.num_train_timesteps,
             )
@@ -283,7 +290,7 @@ class StableDiffusionInpaintingGuidance(nn.Module):
 
         text_embeddings = self.pipe._encode_prompt(
             prompt=prompt,
-            negative_prompt="ugly, blurry, text, pixelated obscure, unnatural colors, poor lighting, dull, cropped, lowres, low quality",
+            negative_prompt="ugly, blurry, out of focus, depth of field, motion blur, text, pixelated obscure, unnatural colors, poor lighting, dull, cropped, lowres, low quality",
             device=self.device,
             num_images_per_prompt=batch_size,
             do_classifier_free_guidance=True,
@@ -369,55 +376,61 @@ class StableDiffusionInpaintingGuidance(nn.Module):
 
         # Text embeddings
         text_embeddings_cond, text_embeddings_uncond = self.get_text_embeddings(prompt, batch_size)
+       
+        # text_embeddings = torch.stack(
+        #     [
+        #         text_embeddings_uncond,  # (for no mask, no text)
+        #         text_embeddings_uncond,  # (for mask, no text)
+        #         text_embeddings_cond,  #  (for mask, text)
+        #     ],
+        #     dim=0,
+        # )
+        # 1. Simplified Text Embeddings (Standard 2-branch CFG)
+        # We only need Uncond and Cond for Img2Img
+        text_embeddings = torch.cat([text_embeddings_uncond, text_embeddings_cond], dim=0)
 
-        text_embeddings = torch.stack(
-            [
-                text_embeddings_uncond,  # (for no mask, no text)
-                text_embeddings_uncond,  # (for mask, no text)
-                text_embeddings_cond,  #  (for mask, text)
-            ],
-            dim=0,
-        )
+        # 2. Get reference latents from your scan
+        reference_rgb_BCHW = ref_rgb.permute(0, 3, 1, 2)
+        reference_latents = self.encode_images(reference_rgb_BCHW)
+        # # The goal of this is to take a RGB image, add noise to it, and then denoise it to obtain an inpainted image
+        # rgb_BCHW = rgb.permute(0, 3, 1, 2)
+        # mask = mask.permute(0, 3, 1, 2)
 
-        # The goal of this is to take a RGB image, add noise to it, and then denoise it to obtain an inpainted image
-        rgb_BCHW = rgb.permute(0, 3, 1, 2)
-        mask = mask.permute(0, 3, 1, 2)
+        # # Get image latents, mask, and masked latents
+        # latents = self.encode_images(rgb_BCHW)
+        # masked_img = (rgb_BCHW * 2 - 1) * (mask < 0.5)
+        # masked_img = (masked_img * 0.5 + 0.5).clamp(0, 1)
+        # masked_latent = self.encode_images(masked_img)
 
-        # Get image latents, mask, and masked latents
-        latents = self.encode_images(rgb_BCHW)
-        masked_img = (rgb_BCHW * 2 - 1) * (mask < 0.5)
-        masked_img = (masked_img * 0.5 + 0.5).clamp(0, 1)
-        masked_latent = self.encode_images(masked_img)
+        # masked_empty_img = torch.ones_like(masked_img) * 0.5
+        # masked_empty_img_latent = self.encode_images(masked_empty_img)
 
-        masked_empty_img = torch.ones_like(masked_img) * 0.5
-        masked_empty_img_latent = self.encode_images(masked_empty_img)
+        # # Combine the masks
+        # mask_64 = F.interpolate(mask.float(), (64, 64))
+        # mask_64_00 = torch.ones_like(mask_64)
+        # masks = torch.cat(
+        #     [
+        #         mask_64_00,
+        #         mask_64,
+        #         mask_64,
+        #     ],
+        #     dim=0,
+        # )  # The masks are (fulll mask, mask, mask)
 
-        # Combine the masks
-        mask_64 = F.interpolate(mask.float(), (64, 64))
-        mask_64_00 = torch.ones_like(mask_64)
-        masks = torch.cat(
-            [
-                mask_64_00,
-                mask_64,
-                mask_64,
-            ],
-            dim=0,
-        )  # The masks are (fulll mask, mask, mask)
+        # masked_latents = torch.cat(
+        #     [
+        #         masked_empty_img_latent,
+        #         masked_latent,
+        #         masked_latent,
+        #     ],
+        #     dim=0,
+        # )  # The masked latents corresponding to the (full mask, mask, mask)
 
-        masked_latents = torch.cat(
-            [
-                masked_empty_img_latent,
-                masked_latent,
-                masked_latent,
-            ],
-            dim=0,
-        )  # The masked latents corresponding to the (full mask, mask, mask)
-
-        self.scheduler.config.timestep_spacing = (
-            "trailing"  # Supposed to be better as per https://arxiv.org/pdf/2305.08891.pdf
-        )
+        # self.scheduler.config.timestep_spacing = (
+        #     "trailing"  # Supposed to be better as per https://arxiv.org/pdf/2305.08891.pdf
+        # )
         self.scheduler.set_timesteps(num_inference_steps)
-        self.ddim_inverse_scheduler.set_timesteps(num_inference_steps)
+        # self.ddim_inverse_scheduler.set_timesteps(num_inference_steps)
 
         timesteps, num_steps, init_timestep = self.get_timesteps(
             self.scheduler,
@@ -427,51 +440,60 @@ class StableDiffusionInpaintingGuidance(nn.Module):
             fixed_inference_count=fixed_inference_count,
         )
 
-        # ORIGINAL
+        # # ORIGINAL
+        # # if not self.cfg.invert:
+        # #     # Add noise corresponding to a strength to the latent
+        # #     noise = torch.randn_like(latents)
+        # #     latents = self.scheduler.add_noise(latents, noise, timesteps[0])
+        # # Assuming 'rgb' contains your low-quality reference scan
         # if not self.cfg.invert:
-        #     # Add noise corresponding to a strength to the latent
-        #     noise = torch.randn_like(latents)
-        #     latents = self.scheduler.add_noise(latents, noise, timesteps[0])
-        # Assuming 'rgb' contains your low-quality reference scan
-        if not self.cfg.invert:
-            # 1. Encode your low-quality reference RGB into latents
-            reference_rgb_BCHW = ref_rgb.permute(0, 3, 1, 2)
-            reference_latents = self.encode_images(reference_rgb_BCHW)
+        #     # 1. Encode your low-quality reference RGB into latents
+        #     reference_rgb_BCHW = ref_rgb.permute(0, 3, 1, 2)
+        #     reference_latents = self.encode_images(reference_rgb_BCHW)
             
-            # 2. Add some noise to the reference, but NOT full noise.
-            # We want to preserve the rough structure and colors (e.g., strength=0.7)
-            noise = torch.randn_like(reference_latents)
+        #     # 2. Add some noise to the reference, but NOT full noise.
+        #     # We want to preserve the rough structure and colors (e.g., strength=0.7)
+        #     noise = torch.randn_like(reference_latents)
             
-            # Make sure your config sets a max_step_percent that corresponds to
-            # the 'strength' you want (e.g., 0.7 max noise).
+        #     # Make sure your config sets a max_step_percent that corresponds to
+        #     # the 'strength' you want (e.g., 0.7 max noise).
             
-            # We ignore the standard 'latents' (which are from the student splats)
-            # and use our reference latents instead.
-            latents = self.scheduler.add_noise(reference_latents, noise, timesteps[0])
-        else:
-            latents = self.invert(
-                rgb_BCHW,
-                rgb_BCHW,
-                mask,
-                prompt,
-                cfg=0.0,
-                num_inference_steps=num_inference_steps,
-                timesteps=timesteps,
-            )
+        #     # We ignore the standard 'latents' (which are from the student splats)
+        #     # and use our reference latents instead.
+        #     latents = self.scheduler.add_noise(reference_latents, noise, timesteps[0])
+        # else:
+        #     latents = self.invert(
+        #         rgb_BCHW,
+        #         rgb_BCHW,
+        #         mask,
+        #         prompt,
+        #         cfg=0.0,
+        #         num_inference_steps=num_inference_steps,
+        #         timesteps=timesteps,
+        #     )
 
-        # ORIGINAL
-        # if strength == 1.0:
-        #     noise = torch.randn_like(latents)
-        #     latents = noise  # If strength is one, start from pure noise
+        # # ORIGINAL
+        # # if strength == 1.0:
+        # #     noise = torch.randn_like(latents)
+        # #     latents = noise  # If strength is one, start from pure noise
 
-        # Get timesteps required for denoising
-        one_step_pred_0 = None
-
-        for i, t in tqdm(enumerate(timesteps), total=len(timesteps), leave=False, desc="Sampling"):
-
-            latent_model_input = torch.cat([latents] * 3)
-
-            latent_model_input = torch.cat([latent_model_input, masks, masked_latents], dim=1)
+        # # Get timesteps required for denoising
+        # one_step_pred_0 = None
+        
+        # 4. Add noise to the reference scan
+        noise = torch.randn_like(reference_latents)
+        latents = self.scheduler.add_noise(reference_latents, noise, timesteps[0])
+        
+        # 5. Denoising Loop
+        # for i, t in tqdm(enumerate(timesteps), total=len(timesteps), leave=False, desc="Sampling"):
+        for i, t in tqdm(enumerate(timesteps), total=len(timesteps), leave=False, desc="Global Enhancement"):
+            
+            # latent_model_input = torch.cat([latents] * 3)
+            
+            # latent_model_input = torch.cat([latent_model_input, masks, masked_latents], dim=1)
+            
+            # Standard 2-branch input (No masks, no 9-channel stacking!)
+            latent_model_input = torch.cat([latents] * 2)
 
             noise_pred = self.forward_unet(
                 latent_model_input,
@@ -479,12 +501,16 @@ class StableDiffusionInpaintingGuidance(nn.Module):
                 encoder_hidden_states=text_embeddings.to(self.weights_dtype),
             )
 
-            noise_pred_00, noise_pred_uncond, noise_pred_text = noise_pred.chunk(3)
-            noise_pred = (
-                noise_pred_00
-                + img_cfg * (noise_pred_uncond - noise_pred_00)
-                + guidance_scale * (noise_pred_text - noise_pred_uncond)
-            )
+            # noise_pred_00, noise_pred_uncond, noise_pred_text = noise_pred.chunk(3)
+            # noise_pred = (
+            #     noise_pred_00
+            #     + img_cfg * (noise_pred_uncond - noise_pred_00)
+            #     + guidance_scale * (noise_pred_text - noise_pred_uncond)
+            # )
+            # Standard Classifier-Free Guidance
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+            
 
             # compute the previous noisy sample x_t -> x_t-1
             if i != len(timesteps) - 1:
