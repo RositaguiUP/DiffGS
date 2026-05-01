@@ -8,4 +8,4 @@ depth_estimator:
   mode: "indoor"
 
 env_id: '6VSV7_695'
-floor_number: '0'
+floor_number: '0' 

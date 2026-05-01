@@ -822,35 +822,66 @@ class GaussianSplatting(Model):
 
                 if not self.config.set_sds_weight_l2_and_perceptual:
                     weight = 1.0
+                    
+                 # Full, unmasked enhanced image from Img2Img
+                pred_img = misc["multi_step_pred"]
+                render_img = rendered_rgb_bchw
 
+
+                # Calculate loss globally! This will:
+                # 1. Sharpen existing geometry matching the enhanced textures.
+                # 2. Force 3DGS to grow into the holes to match the full enhanced image.
+                # loss_dict["loss_multi_step_l1"] = (
+                #     self.config.lambda_one_step_l1
+                #     * weight
+                #     * F.l1_loss(misc["multi_step_pred"], rendered_rgb_bchw, reduction="sum")
+                #     / batch_size
+                # )
+                # loss_dict["loss_multi_step_perceptual"] = (
+                #     self.config.lambda_one_step_perceptual
+                #     * weight
+                #     * self.lpips(
+                #         misc["multi_step_pred"].detach() * 2 - 1,
+                #         rendered_rgb_bchw * 2 - 1,
+                #     ).sum()
+                #     / batch_size
+                # )
+                # loss_dict["loss_multi_step_ssim"] = (
+                #     self.config.lambda_one_step_ssim
+                #     * weight
+                #     * (1 - ssim_loss_fn(misc["multi_step_pred"], rendered_rgb_bchw).sum())
+                #     / batch_size
+                # )
                 loss_dict["loss_multi_step"] = (
                     self.config.lambda_one_step
                     * weight
                     * 0.5
-                    * F.mse_loss(misc["multi_step_pred"], rendered_rgb_bchw, reduction="sum")
+                    * F.mse_loss(pred_img, render_img, reduction="sum")
                     / batch_size
                 )
                 loss_dict["loss_multi_step_l1"] = (
                     self.config.lambda_one_step_l1
                     * weight
-                    * F.l1_loss(misc["multi_step_pred"], rendered_rgb_bchw, reduction="sum")
+                    * F.l1_loss(pred_img, render_img, reduction="sum")
                     / batch_size
                 )
                 loss_dict["loss_multi_step_perceptual"] = (
                     self.config.lambda_one_step_perceptual
                     * weight
                     * self.lpips(
-                        misc["multi_step_pred"].detach() * 2 - 1,
-                        rendered_rgb_bchw * 2 - 1,
+                        pred_img.detach() * 2 - 1,
+                        render_img * 2 - 1,
                     ).sum()
                     / batch_size
                 )
-                loss_dict["loss_multi_step_ssim"] = (
-                    self.config.lambda_one_step_ssim
-                    * weight
-                    * (1 - ssim_loss_fn(misc["multi_step_pred"], rendered_rgb_bchw).sum())
-                    / batch_size
-                )
+                
+                if self.config.lambda_one_step_ssim > 0:
+                    loss_dict["loss_multi_step_ssim"] = (
+                        self.config.lambda_one_step_ssim
+                        * weight
+                        * (1 - ssim_loss_fn(pred_img, render_img).sum())
+                        / batch_size
+                    )
             else:
 
                 weight = misc["w"].squeeze()[0] if misc["w"].squeeze().numel() > 1 else misc["w"].squeeze()

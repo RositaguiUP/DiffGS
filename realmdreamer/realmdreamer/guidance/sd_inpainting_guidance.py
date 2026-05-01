@@ -170,11 +170,9 @@ class StableDiffusionInpaintingGuidance(nn.Module):
         mask_grad=True,
         **kwargs,
     ):
-        # OVERRIDE: Force the mask to be all ones (Global Enhancement)
-        mask = torch.ones_like(mask)
-
         batch_size = rgb.shape[0]
 
+        # Timestep logic
         if self.cfg.anneal:
 
             if self.cfg.prolific_anneal:
@@ -200,32 +198,38 @@ class StableDiffusionInpaintingGuidance(nn.Module):
                 device=self.device,
             )
 
+        # Generate the complete, enhanced image from the blurry scan
         with torch.no_grad():
-            inpainted_image, _ = self.sample(
+            enhanced_image, _ = self.sample(
                 rgb=rgb,
                 ref_rgb=ref_rgb,
-                mask=None,
+                mask=None, # Img2Img doesn't need a mask
                 prompt=prompt,
                 strength=t / self.num_train_timesteps,
+                num_inference_steps=self.cfg.num_steps_sample,
             )
 
-            og_rgb_BCHW = og_rgb.permute(0, 3, 1, 2)
+            # og_rgb_BCHW = og_rgb.permute(0, 3, 1, 2)
 
         w = self.get_weighting(t)
+        
+        # IMPORTANT: Return a dummy 0 loss here! 
+        # The actual loss is computed in gs_model.py against the Gaussians.
+        dummy_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
 
-        l1_img_loss = F.l1_loss(inpainted_image, og_rgb_BCHW, reduction="mean")
-        l2_img_loss = F.mse_loss(inpainted_image, og_rgb_BCHW, reduction="sum") / batch_size
-        lpips_img_loss = self.lpips(inpainted_image * 2 - 1, og_rgb_BCHW * 2 - 1)
+        # l1_img_loss = F.l1_loss(inpainted_image, og_rgb_BCHW, reduction="mean")
+        # l2_img_loss = F.mse_loss(inpainted_image, og_rgb_BCHW, reduction="sum") / batch_size
+        # lpips_img_loss = self.lpips(inpainted_image * 2 - 1, og_rgb_BCHW * 2 - 1)
 
-        loss_nfsd = 1000 * (lpips_img_loss + l2_img_loss)
+        # loss_nfsd = 1000 * (lpips_img_loss + l2_img_loss)
 
         return {
-            "loss_sds": loss_nfsd,
+            "loss_sds": dummy_loss,
         }, {
             "timesteps": t,
             "grad": torch.zeros_like(rgb),
             "w": w,
-            "multi_step_pred": inpainted_image,
+            "multi_step_pred": enhanced_image,
         }
 
     @torch.cuda.amp.autocast(enabled=False)
@@ -375,7 +379,7 @@ class StableDiffusionInpaintingGuidance(nn.Module):
         guidance_scale = self.cfg.guidance_scale
 
         # Text embeddings
-        text_embeddings_cond, text_embeddings_uncond = self.get_text_embeddings(prompt, batch_size)
+        # text_embeddings_cond, text_embeddings_uncond = self.get_text_embeddings(prompt, batch_size)
        
         # text_embeddings = torch.stack(
         #     [
@@ -386,8 +390,8 @@ class StableDiffusionInpaintingGuidance(nn.Module):
         #     dim=0,
         # )
         # 1. Simplified Text Embeddings (Standard 2-branch CFG)
-        # We only need Uncond and Cond for Img2Img
-        text_embeddings = torch.cat([text_embeddings_uncond, text_embeddings_cond], dim=0)
+        # get_text_embeddings automatically returns [Cond, Uncond] concatenated perfectly
+        text_embeddings = self.get_text_embeddings(prompt, batch_size)
 
         # 2. Get reference latents from your scan
         reference_rgb_BCHW = ref_rgb.permute(0, 3, 1, 2)
@@ -436,7 +440,7 @@ class StableDiffusionInpaintingGuidance(nn.Module):
             self.scheduler,
             num_inference_steps,  # for full run, use num_train_timesteps
             strength,
-            latents.device,
+            reference_latents.device,
             fixed_inference_count=fixed_inference_count,
         )
 
@@ -493,11 +497,14 @@ class StableDiffusionInpaintingGuidance(nn.Module):
             # latent_model_input = torch.cat([latent_model_input, masks, masked_latents], dim=1)
             
             # Standard 2-branch input (No masks, no 9-channel stacking!)
-            latent_model_input = torch.cat([latents] * 2)
+            latent_model_input = torch.cat([latents] * 2, dim=0)
 
+            # Ensure t is batched properly for UNet
+            t_batched = t.repeat(batch_size * 2).to(self.device)
+            
             noise_pred = self.forward_unet(
                 latent_model_input,
-                t,
+                t_batched,
                 encoder_hidden_states=text_embeddings.to(self.weights_dtype),
             )
 
@@ -507,8 +514,11 @@ class StableDiffusionInpaintingGuidance(nn.Module):
             #     + img_cfg * (noise_pred_uncond - noise_pred_00)
             #     + guidance_scale * (noise_pred_text - noise_pred_uncond)
             # )
+            
+            # Since get_text_embeddings returns [Cond, Uncond], noise_pred is also[Cond, Uncond]
+            noise_pred_text, noise_pred_uncond = noise_pred.chunk(2)
+            
             # Standard Classifier-Free Guidance
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
             
 
