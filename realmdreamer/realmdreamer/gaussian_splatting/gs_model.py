@@ -298,45 +298,13 @@ class GaussianSplatting(Model):
         
 
     def setup_diffusion(self, dreambooth_path=None):
-
-        if self.config.guidance == "sds":
-            self.guidance = StableDiffusionGuidance(
-                device="cuda",
-                full_precision=self.config.full_precision,
-                model_path=dreambooth_path,
-                min_step_percent=self.config.min_step_percent,
-                max_step_percent=self.config.max_step_percent,
-                guidance_scale=self.config.guidance_scale,
-                anneal=self.config.anneal,
-                prolific_anneal=self.config.prolific_anneal,
-                invert_ddim=self.config.invert_ddim,
-                num_steps_sample=self.config.num_steps_sample,
-                ddim_invert_method=self.config.ddim_invert_method,
-                fixed_num_steps=self.config.fixed_num_steps,
-            )
-        elif self.config.guidance == "sds_inpainting":
-            self.guidance = StableDiffusionInpaintingGuidance(
-                device="cuda",
-                full_precision=self.config.full_precision,
-                min_step_percent=self.config.min_step_percent,
-                max_step_percent=self.config.max_step_percent,
-                guidance_scale=self.config.guidance_scale,
-                img_guidance_scale=self.config.img_guidance_scale,
-                anneal=self.config.anneal,
-                prolific_anneal=self.config.prolific_anneal,
-                invert_ddim=self.config.invert_ddim,
-                num_steps_sample=self.config.num_steps_sample,
-            )
+        if self.config.guidance == "controlnet_tile":
+            from realmdreamer.guidance.sd_controlnet_guidance import StableDiffusionControlNetGuidance
+            self.guidance = StableDiffusionControlNetGuidance(device="cuda")
         else:
-            raise NotImplementedError(f"{self.config.guidance} is not a valid guidance model")
-
-        if self.config.depth_guidance or self.config.load_depth_guidance:
-            # self.depth_guidance = MarigoldGuidance(device='cuda')
-            self.depth_guidance = GeoWizardGuidance(device="cuda")
-
-        # If anneal is set to none, disable time prior
-        if not self.config.anneal and self.config.guidance != "dummy":
-            self.guidance.time_prior = None
+            raise NotImplementedError("Only controlnet_tile is supported for this restoration pipeline.")
+            
+        self.depth_guidance = None # We officially removed Marigold/GeoWizard!
 
     def populate_modules(self):
         super().populate_modules()
@@ -697,30 +665,19 @@ class GaussianSplatting(Model):
 
         loss_dict = {}
         misc = {}
-
         batch_size = batch["inpainting_mask"].shape[0]
 
-        # Get image from point cloud and inpainting mask
-        image = batch["image"].to(self.device)  # B H W C
-
-        batch["inpainting_mask"] = batch["inpainting_mask"].to(self.device)
-        batch["inpainting_mask_2"] = batch["inpainting_mask_2"].to(self.device)
-        batch["depth_image"] = batch["depth_image"].float().to(self.device)
-
-        # Mask override
-        if self.config.ignore_mask:
-            batch["inpainting_mask"] = torch.ones_like(batch["inpainting_mask"]) > 0
-            batch["inpainting_mask_2"] = torch.ones_like(batch["inpainting_mask_2"]) > 0
-
-        # inverted mask is inverse of the combined masks - 1 = RGB, 0 = hole in point cloud
-        inverted_inpainting_mask = ~batch["inpainting_mask"] & ~batch["inpainting_mask_2"]
-
-        rendered_rgb_bhwc = outputs["rgb"].permute(0, 2, 3, 1)
-        rendered_rgb_bchw = outputs["rgb"]
-        rendered_depth_bhwc = outputs["depth"].permute(0, 2, 3, 1)
-        rendered_depth_bchw = outputs["depth"]
+        image = batch["image"].to("cuda")
+        batch["depth_image"] = batch["depth_image"].float().to("cuda")
+            
+        # 1. SHARP RENDERS
+        sharp_rendered_rgb_bhwc = outputs["rgb"].permute(0, 2, 3, 1).clone()
+        sharp_rendered_rgb_bchw = outputs["rgb"].clone()
+        misc["sharp_render"] = sharp_rendered_rgb_bhwc
         
-        if self.config.deblur_enabled and step_ratio > 0.13: # Only start blurring after the scene has basic structure
+        # 2. BLUR KERNEL (Starts at ratio 0.016 -> ~Step 500)
+        start_kernel_ratio = 0.20
+        if self.config.deblur_enabled and step_ratio > start_kernel_ratio: # Only start blurring after the scene has basic structure
             # 1. Get the image index and the corresponding kernel
             img_idx = batch["image_idx"] 
             # Use the full batch of kernels
@@ -734,385 +691,80 @@ class GaussianSplatting(Model):
             # 3. Prepare kernel for RGB depthwise convolution
             # Instead of .repeat on the whole batch, we need to repeat the channel dim
             # Shape change: [B, 1, 15, 15] -> [B*3, 1, 15, 15] to match groups=3 in a batch
-            B = rendered_rgb_bchw.shape[0]
+            B = sharp_rendered_rgb_bchw.shape[0]
             kernel_rgb = curr_kernels.repeat_interleave(3, dim=0) 
-
+            
             # 4. Apply blur to the RENDERED image
             p = self.config.deblur_kernel_size // 2
-            rendered_rgb_bchw = F.conv2d(
-                rendered_rgb_bchw, 
-                weight=kernel_rgb, 
-                padding=p, 
-                groups=3 * B # Use 3 * Batch for depthwise across the whole batch
-            )
             
-            # 5. Update bhwc for loss logic
-            rendered_rgb_bhwc = rendered_rgb_bchw.permute(0, 2, 3, 1)
             
-            # 6. Improved Regularization
+            blurred_rendered_rgb_bchw = F.conv2d(sharp_rendered_rgb_bchw, weight=kernel_rgb, padding=p, groups=3 * B)
+            rendered_rgb_bhwc = blurred_rendered_rgb_bchw.permute(0, 2, 3, 1)
+            
+            misc["blurred_render"] = rendered_rgb_bhwc
+            misc["kernel"] = curr_kernels
+            
+             # 5. Improved Regularization
             # Sparsity (L1) encourages a clean, sharp kernel (delta function)
             # TV loss encourages the kernel to be locally smooth (no salt-and-pepper noise)
             loss_dict["loss_kernel_reg"] = torch.mean(torch.abs(raw_kernels)) * 0.001
             
-            # Optional: Center-weighting (Total Variation) to keep the kernel focused
+            # Center-weighting (Total Variation) to keep the kernel focused
             diff_h = torch.abs(curr_kernels[:, :, 1:, :] - curr_kernels[:, :, :-1, :]).mean()
             diff_w = torch.abs(curr_kernels[:, :, :, 1:] - curr_kernels[:, :, :, :-1]).mean()
             loss_dict["loss_kernel_tv"] = (diff_h + diff_w) * 0.01
+        else:
+            rendered_rgb_bhwc = sharp_rendered_rgb_bhwc
+            misc["blurred_render"] = sharp_rendered_rgb_bhwc
         
         for key in ["rgb", "depth"]:
-
             outputs[key] = outputs[key].permute(0, 2, 3, 1)
 
-        # Only compute SDS loss during training
-        if self.training:
+        # --- 2. THE GEOMETRIC ANCHOR (Direct Depth Loss) ---
+        rendered_depth_bhwc = outputs["depth"]
+        # Match dimensions if needed
+        if rendered_depth_bhwc.shape[1:3] != batch["depth_image"].shape[1:3]:
+            outputs["depth"] = F.interpolate(outputs["depth"].permute(0,3,1,2), size=batch["depth_image"].shape[1:3], mode="nearest").permute(0,2,3,1)
+            rendered_depth_bhwc = outputs["depth"]
 
-            if self.config.invert_ddim:
-
-                if self.config.invert_after_step and step_ratio < self.config.invert_step_ratio:
-                    self.guidance.cfg.invert = False
-                else:
-                    self.guidance.cfg.invert = True
-
-            sds_start_time = time.time()
-
-            # Pass the RGB image through the diffusion model
-            if self.config.guidance == "sds":
-
-                fn = self.guidance.multi_step
-
-                loss_dict, misc = fn(
-                    rgb=rendered_rgb_bhwc,
-                    prompt=prompt,
-                    mask=batch["inpainting_mask"],
-                    rgb_as_latents=False,
-                    current_step_ratio=step_ratio,
-                )
-
-            elif self.config.guidance == "sds_inpainting":
-
-                fn = self.guidance.multi_step
-
-                loss_dict, misc = fn(
-                    rgb=rendered_rgb_bhwc,
-                    og_rgb=rendered_rgb_bhwc,
-                    ref_rgb=image,
-                    prompt=prompt,
-                    mask=batch["inpainting_mask"],
-                    rgb_as_latents=False,
-                    current_step_ratio=step_ratio,
-                    mask_grad=True,
-                )
-
-            end_sds_time = time.time()
-
-            ssim_loss_fn = MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0).to(rendered_rgb_bchw.device)
-
-            # SDS loss
-            loss_dict["loss_sds"] = self.config.lambda_sds * loss_dict["loss_sds"]
-
-            # SDS - RGB loss - either multi step or one step should be there
-            if self.config.sharpen_in_post:
-
-                key = "multi_step_pred" if "multi_step_pred" in misc.keys() else "one_step_pred"
-                misc[key] = sharpness(misc[key], factor=self.config.sharpen_in_post_factor)
-
-            if "multi_step_pred" in misc.keys():
-
-                weight = misc["w"].squeeze()[0] if misc["w"].squeeze().numel() > 1 else misc["w"].squeeze()
-
-                if not self.config.set_sds_weight_l2_and_perceptual:
-                    weight = 1.0
-                    
-                 # Full, unmasked enhanced image from Img2Img
-                pred_img = misc["multi_step_pred"]
-                render_img = rendered_rgb_bchw
-
-
-                # Calculate loss globally! This will:
-                # 1. Sharpen existing geometry matching the enhanced textures.
-                # 2. Force 3DGS to grow into the holes to match the full enhanced image.
-                # loss_dict["loss_multi_step_l1"] = (
-                #     self.config.lambda_one_step_l1
-                #     * weight
-                #     * F.l1_loss(misc["multi_step_pred"], rendered_rgb_bchw, reduction="sum")
-                #     / batch_size
-                # )
-                # loss_dict["loss_multi_step_perceptual"] = (
-                #     self.config.lambda_one_step_perceptual
-                #     * weight
-                #     * self.lpips(
-                #         misc["multi_step_pred"].detach() * 2 - 1,
-                #         rendered_rgb_bchw * 2 - 1,
-                #     ).sum()
-                #     / batch_size
-                # )
-                # loss_dict["loss_multi_step_ssim"] = (
-                #     self.config.lambda_one_step_ssim
-                #     * weight
-                #     * (1 - ssim_loss_fn(misc["multi_step_pred"], rendered_rgb_bchw).sum())
-                #     / batch_size
-                # )
-                loss_dict["loss_multi_step"] = (
-                    self.config.lambda_one_step
-                    * weight
-                    * 0.5
-                    * F.mse_loss(pred_img, render_img, reduction="sum")
-                    / batch_size
-                )
-                loss_dict["loss_multi_step_l1"] = (
-                    self.config.lambda_one_step_l1
-                    * weight
-                    * F.l1_loss(pred_img, render_img, reduction="sum")
-                    / batch_size
-                )
-                loss_dict["loss_multi_step_perceptual"] = (
-                    self.config.lambda_one_step_perceptual
-                    * weight
-                    * self.lpips(
-                        pred_img.detach() * 2 - 1,
-                        render_img * 2 - 1,
-                    ).sum()
-                    / batch_size
-                )
-                
-                if self.config.lambda_one_step_ssim > 0:
-                    loss_dict["loss_multi_step_ssim"] = (
-                        self.config.lambda_one_step_ssim
-                        * weight
-                        * (1 - ssim_loss_fn(pred_img, render_img).sum())
-                        / batch_size
-                    )
-            else:
-
-                weight = misc["w"].squeeze()[0] if misc["w"].squeeze().numel() > 1 else misc["w"].squeeze()
-
-                if not self.config.set_sds_weight_l2_and_perceptual:
-                    weight = 1.0
-
-                loss_dict["loss_one_step"] = (
-                    self.config.lambda_one_step
-                    * weight
-                    * 0.5
-                    * F.mse_loss(misc["one_step_pred"], rendered_rgb_bchw, reduction="sum")
-                    / batch_size
-                )
-                loss_dict["loss_one_step_l1"] = (
-                    self.config.lambda_one_step_l1
-                    * weight
-                    * F.l1_loss(misc["one_step_pred"], rendered_rgb_bchw, reduction="sum")
-                    / batch_size
-                )
-                loss_dict["loss_one_step_perceptual"] = (
-                    self.config.lambda_one_step_perceptual
-                    * weight
-                    * self.lpips(
-                        misc["one_step_pred"].detach() * 2 - 1,
-                        rendered_rgb_bchw * 2 - 1,
-                    ).sum()
-                    / batch_size
-                )
-                loss_dict["loss_one_step_ssim"] = (
-                    self.config.lambda_one_step_ssim
-                    * weight
-                    * (1 - ssim_loss_fn(misc["one_step_pred"], rendered_rgb_bchw).sum())
-                    / batch_size
-                )
-
-            remaining_loss_s = time.time()
-
-            # RGB loss
-            loss_dict["loss_rgb"], mask_rgb_anchor = self.masked_rgb_loss(
-                rendered_rgb_bhwc,
-                image,
-                batch["depth_image"].to(self.device),
-                batch["inpainting_mask"],
+        valid_depth_mask = batch["depth_image"] > 0
+        if valid_depth_mask.sum() > 0:
+            loss_dict["loss_depth"] = self.config.lambda_depth * F.l1_loss(
+                rendered_depth_bhwc[valid_depth_mask], 
+                batch["depth_image"].to(self.device)[valid_depth_mask]
             )
-            loss_dict["loss_rgb"] = self.config.lambda_rgb * loss_dict["loss_rgb"]
-            misc["mask_rgb"] = mask_rgb_anchor
 
-            # Depth Loss
-            # print(outputs['depth'].shape, batch['depth_image'].shape)
-            if (
-                rendered_depth_bhwc.shape[1] != batch["depth_image"].shape[1]
-                or rendered_depth_bhwc.shape[2] != batch["depth_image"].shape[2]
-            ):
-                outputs["depth"] = F.interpolate(
-                    outputs["depth"],
-                    size=(batch["depth_image"].shape[1], batch["depth_image"].shape[2]),
-                    mode="nearest",
-                )
-                rendered_depth_bhwc = outputs["depth"].permute(0, 2, 3, 1)  # B C H W -> B H W C
+        # --- 3. THE PHYSICAL ANCHOR (Blurred RGB vs GT RGB) ---
+        loss_dict["loss_rgb"] = self.config.lambda_rgb * self.rgb_loss(rendered_rgb_bhwc, image)
+
+        # --- 4. THE DISTILLATION ANCHOR (Diffusion) ---
+        start_diff_ratio = 0.30
+        if self.training and step_ratio > start_diff_ratio:
+            # Pass SHARP render, GT RGB, and GT Depth to ControlNet
+            pseudo_gt_sharp_bchw = self.guidance.multi_step(
+                rgb=sharp_rendered_rgb_bhwc,
+                scan_rgb=image,
+                scan_depth=batch["depth_image"].permute(0, 3, 1, 2).to(self.device),
+                prompt=prompt,
+                current_step_ratio=step_ratio,
+            )
             
-            if (~batch["inpainting_mask"]).sum() > 0:  # If the mask is all 1s, don't compute the depth loss
-                loss_dict["loss_depth"] = self.config.lambda_depth * self.masked_depth_loss(
-                    rendered_depth_bhwc,
-                    batch["depth_image"].to(self.device),
-                    batch["inpainting_mask"],
-                )
+            # Ensure FP32 for loss computation
+            pseudo_gt_sharp_bchw = pseudo_gt_sharp_bchw.float()
+            misc["pseudo_gt"] = pseudo_gt_sharp_bchw
+            
+            
+            # Pull the SHARP 3DGS render toward the Pseudo-GT
+            loss_dict["loss_distill_mse"] = self.config.lambda_one_step * F.mse_loss(sharp_rendered_rgb_bchw, pseudo_gt_sharp_bchw)
+            loss_dict["loss_distill_lpips"] = self.config.lambda_one_step_perceptual * self.lpips(sharp_rendered_rgb_bchw * 2 - 1, pseudo_gt_sharp_bchw * 2 - 1).mean()
 
-            # Opaqueness Loss
-            clamped_opacity = torch.clamp(self.gaussian_model.get_opacity, min=1e-5, max=1.0 - 1e-5)
-            loss_dict["loss_opaque"] = self.config.lambda_opaque * F.binary_cross_entropy(
-                clamped_opacity, clamped_opacity
-            )
+        # Opaqueness Loss
+        clamped_opacity = torch.clamp(self.gaussian_model.get_opacity, min=1e-5, max=1.0 - 1e-5)
+        loss_dict["loss_opaque"] = self.config.lambda_opaque * F.binary_cross_entropy(clamped_opacity, clamped_opacity)
 
-            # Depth guidance loss
-            if self.config.depth_guidance:
-
-                fn_depth = (
-                    self.depth_guidance.sample
-                    if self.config.depth_guidance_multi_step
-                    else self.depth_guidance.pred_one_step
-                )
-
-                # depth_pred_normalized = self.depth_guidance.pred_one_step(outputs['rgb'].permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
-                if "multi_step_pred" in misc.keys():
-                    depth_pred_normalized = fn_depth(
-                        rgb_in=misc["multi_step_pred"],
-                        depth_in=outputs["depth"].permute(0, 3, 1, 2),
-                        strength=1.0,
-                    )
-                else:
-                    depth_pred_normalized = fn_depth(
-                        rgb_in=misc["one_step_pred"],
-                        depth_in=outputs["depth"].permute(0, 3, 1, 2),
-                        strength=1.0,
-                    )
-
-                # mask_align = ~batch['inpainting_mask'] & (batch['depth_image'] > 0)
-                mask_align = batch["depth_image"] > 0
-
-                depth_pred_aligned = align_depths(
-                    source_depth=depth_pred_normalized,
-                    target_depth=outputs["depth"].permute(0, 3, 1, 2),
-                    mask=mask_align.permute(0, 3, 1, 2),
-                    enforce_scale_positive=True,
-                )  # B C H W
-
-                if depth_pred_aligned is not None:
-
-                    misc["depth_pred"] = depth_pred_aligned.permute(0, 2, 3, 1)  # B C H W -> B H W C
-
-                    if self.config.depth_loss == "l2":
-
-                        # Regular L2 Loss
-                        loss_dict["loss_depth_sds"] = (
-                            self.config.lambda_depth_sds
-                            * F.mse_loss(
-                                depth_pred_aligned.detach(),
-                                outputs["depth"].permute(0, 3, 1, 2),
-                                reduction="sum",
-                            )
-                            / batch_size
-                        )
-
-                    elif self.config.depth_loss == "ranking":
-
-                        loss_dict["loss_depth_sds"] = self.config.lambda_depth_sds * depth_ranking_loss(
-                            rendered_depth_bchw, depth_pred_normalized.detach()
-                        )
-
-                    elif self.config.depth_loss == "ranking_multi_patch":
-
-                        mask_bchw = batch["inpainting_mask"].permute(0, 3, 1, 2)
-
-                        loss_dict["loss_depth_sds"] = depth_ranking_loss_multi_patch_masked(
-                            rendered_depth=rendered_depth_bchw,
-                            sampled_depth=depth_pred_aligned,
-                            mask=mask_bchw,
-                            num_patches=self.config.depth_num_patches,
-                            num_pairs=self.config.depth_num_pairs,
-                            crop_size=(
-                                self.config.depth_patch_size,
-                                self.config.depth_patch_size,
-                            ),
-                        )
-
-                    elif self.config.depth_loss == "ranking_smooth":
-
-                        # Ranking Loss
-                        margin = 1e-4
-                        rendered_depth_bchw = outputs["depth"].permute(0, 3, 1, 2)
-
-                        depth_diff_vertical_render = (
-                            rendered_depth_bchw[:, :, 1:, :] - rendered_depth_bchw[:, :, :-1, :]
-                        )
-                        depth_diff_vertical_gt = (
-                            depth_pred_aligned[:, :, 1:, :] - depth_pred_aligned[:, :, :-1, :] + margin
-                        )
-
-                        depth_diff_horizontal_render = (
-                            rendered_depth_bchw[:, :, :, 1:] - rendered_depth_bchw[:, :, :, :-1]
-                        )
-                        depth_diff_horizontal_gt = (
-                            depth_pred_aligned[:, :, :, 1:] - depth_pred_aligned[:, :, :, :-1] + margin
-                        )
-
-                        differing_signs_vertical = torch.sign(depth_diff_vertical_render) != torch.sign(
-                            depth_diff_vertical_gt
-                        )
-                        different_signs_horizontal = torch.sign(depth_diff_horizontal_render) != torch.sign(
-                            depth_diff_horizontal_gt
-                        )
-
-                        horizontal_ranking_loss = torch.nanmean(
-                            depth_diff_horizontal_render[different_signs_horizontal]
-                            * torch.sign(depth_diff_horizontal_render[different_signs_horizontal])
-                        )
-
-                        vertical_ranking_loss = torch.nanmean(
-                            depth_diff_vertical_render[differing_signs_vertical]
-                            * torch.sign(depth_diff_vertical_render[differing_signs_vertical])
-                        )
-
-                        ranking_loss = (horizontal_ranking_loss + vertical_ranking_loss) / 2
-
-                        loss_dict["loss_depth_sds"] = self.config.lambda_depth_sds * ranking_loss
-
-                    elif self.config.depth_loss == "pearson":
-
-                        rendered_depth = outputs["depth"].reshape(batch_size, -1)
-                        pred_depth = depth_pred_aligned.permute(0, 2, 3, 1).reshape(batch_size, -1)
-
-                        pearson_corr_loss = 0
-                        for idx in range(batch_size):
-                            pearson_corr_loss += 1.0 - pearson_corrcoef(rendered_depth[idx], pred_depth[idx].detach())
-
-                        loss_dict["loss_depth_sds"] = self.config.lambda_depth_sds * pearson_corr_loss
-
-                    elif self.config.depth_loss == "patch_pearson":
-
-                        rendered_depth = rendered_depth_bchw
-                        pred_depth = depth_pred_normalized
-
-                        depth_loss = patch_pearson_loss(
-                            depth_src=rendered_depth,
-                            depth_target=pred_depth.detach(),
-                            box_p=self.config.depth_patch_size,
-                            p_corr=self.config.depth_patch_percent,
-                        )
-                        loss_dict["loss_depth_sds"] = self.config.lambda_depth_sds * depth_loss
-
-                    elif self.config.depth_loss == "pearson+ranking":
-
-                        rendered_depth_bchw = outputs["depth"].permute(0, 3, 1, 2)
-                        loss_dict["loss_depth_sds"] = self.config.lambda_depth_sds * (
-                            depth_ranking_loss(rendered_depth_bchw, depth_pred_aligned)
-                            + depth_pearson_loss(rendered_depth_bchw, depth_pred_aligned)
-                        )
-
-                else:
-                    print("Skipping step...")
-
-            remaining_loss_end = time.time()
-
-        nan_start = time.time()
-
-        # Ensure that there's no NaNs in the loss
+        # Clean NaNs
         for key in loss_dict.keys():
             loss_dict[key] = torch.nan_to_num(loss_dict[key])
-
-        nan_end = time.time()
 
         return loss_dict, misc
 

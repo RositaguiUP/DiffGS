@@ -14,58 +14,42 @@ else
   exit 1
 fi
 
-scene_folder_path="outputs/${scene_name}"
 
+# Appending ControlNet directives to your prompt
+# prompt="${prompt}, 4k image, photorealistic, cinematic lighting, sharp, high resolution, highly detailed texture"
+
+scene_folder_path="outputs/${scene_name}"
 command="ns-train realmdreamer --data "${scene_folder_path%/}" \
---project_name "RealmDreamer" \
+--project_name "RealmDreamer_Restoration" \
 --experiment_name '${scene_name}' \
 --pipeline.prompt "${prompt}" \
---vis viewer+wandb \
+--vis wandb \
 --machine.num-devices 1 \
 --save-only-latest-checkpoint True \
 --steps_per_save 1000 \
---pipeline.datamanager.camera-optimizer.mode off \
---max-num-iterations 15000 \
---logging.steps_per_log 50 \
---viewer.websocket-port 7009 \
---viewer.quit-on-train-completion True \
+--max-num-iterations 30000 \
+--logging.steps_per_log 100 \
 --pipeline.datamanager.train-num-images-to-sample-from 1 \
---pipeline.datamanager.num_dilations 1 \
---gradient-accumulation-steps 1 \
---pipeline.datamanager.camera-res-scale-factor 1 \
---pipeline.datamanager.debug False \
---pipeline.densification-interval 250 \
---pipeline.model.guidance 'sds_inpainting' \
---pipeline.model.loss_type 'multi_nfsd' \
---pipeline.model.invert_ddim True \
---pipeline.model.use_sigmoid True \
---pipeline.model.average_colors False \
---pipeline.model.lambda_rgb 1000.0 \
---pipeline.model.lambda_depth 0.0 \
---pipeline.model.lambda_sds 1.0 \
---pipeline.model.lambda_opaque 0.01 \
---pipeline.model.lambda_one_step 1 \
---pipeline.model.lambda_one_step_perceptual 100 \
---pipeline.model.lambda_input_constraint_l2 1000 \
---pipeline.model.depth_guidance True \
---pipeline.model.depth_guidance_multi_step False \
---pipeline.model.depth_loss 'pearson' \
---pipeline.model.lambda_depth_sds 1000 \
---pipeline.input_view_constraint False \
---pipeline.input_view_depth_constraint False \
---pipeline.model.max_step_percent 0.4 \
---pipeline.model.min_step_percent 0.2 \
---pipeline.model.anneal False \
---pipeline.model.prolific_anneal False \
---pipeline.model.ignore_mask False \
---pipeline.model.img_guidance_scale 1.8 \
---pipeline.model.guidance_scale 7.5 \
---optimizers.xyz.optimizer.lr 0.01 \
---optimizers.f-dc.optimizer.lr 0.001 \
---optimizers.opacity.optimizer.lr 0.01 \
+--pipeline.datamanager.camera-optimizer.mode off \
+--pipeline.densification-interval 500 \
+--pipeline.density_end_iter 25000 \
+--pipeline.model.guidance 'controlnet_tile' \
+--pipeline.model.deblur_enabled True \
+--pipeline.model.deblur_kernel_size 15 \
+--pipeline.model.lambda_rgb 50.0 \
+--pipeline.model.lambda_depth 10.0 \
+--pipeline.model.depth_guidance False \
+--pipeline.model.load_depth_guidance False \
+--pipeline.model.lambda_depth_sds 0.0 \
+--pipeline.model.lambda_sds 0.0 \
+--pipeline.model.lambda_one_step 5.0 \
+--pipeline.model.lambda_one_step_perceptual 100.0 \
+--pipeline.model.max_step_percent 0.5 \
+--pipeline.model.min_step_percent 0.1 \
+--pipeline.model.anneal True \
+--optimizers.xyz.optimizer.lr 0.005 \
+--optimizers.opacity.optimizer.lr 0.05 \
 --optimizers.scaling.optimizer.lr 0.005 \
---optimizers.rotation.optimizer.lr 0.01 \
---pipeline.datamanager.split_mask_by_area_threshold False \
 --pipeline.model.pcd_path "${scene_folder_path}/pointcloud.ply" "
 
 echo $command

@@ -100,6 +100,47 @@ class GaussianSplattingPipeline(VanillaPipeline):
         if self.config.input_view_constraint:
             self.lpips_loss = lpips.LPIPS(net="vgg").to("cuda")
 
+    @staticmethod
+    def _to_image_tensor(image: Any, normalize: bool = True) -> torch.Tensor:
+        """Convert a tensor or NumPy image to a float tensor in HWC format."""
+        if isinstance(image, np.ndarray):
+            img = image
+            if img.ndim == 4:
+                img = img[0]
+            if img.ndim == 3 and img.shape[0] in (1, 3) and img.shape[1] > 3 and img.shape[2] > 3:
+                img = np.transpose(img, (1, 2, 0))
+            if img.ndim == 2:
+                img = img[:, :, None]
+            img = torch.from_numpy(img)
+        elif isinstance(image, torch.Tensor):
+            img = image.detach().cpu()
+            if img.ndim == 4:
+                img = img[0]
+            if img.ndim == 3 and img.shape[0] in (1, 3) and img.shape[1] > 3 and img.shape[2] > 3:
+                img = img.permute(1, 2, 0)
+            if img.ndim == 2:
+                img = img[:, :, None]
+        else:
+            raise TypeError(f"Unsupported image type for logging: {type(image)}")
+
+        img = img.float()
+        if img.ndim == 3 and img.shape[2] == 1:
+            img = img.repeat(1, 1, 3)
+
+        if normalize:
+            if img.dtype == torch.uint8:
+                img = img / 255.0
+            else:
+                min_val = float(img.min())
+                max_val = float(img.max())
+                if max_val > 1.0 or min_val < 0.0:
+                    img = img - min_val
+                    if max_val - min_val > 1e-6:
+                        img = img / (max_val - min_val)
+            img = torch.clamp(img, 0.0, 1.0)
+
+        return img
+
     def get_train_loss_dict(self, step: int, get_image_dict: bool = False):
         """This function gets your training loss dict and performs image editing.
         Args:
@@ -154,191 +195,86 @@ class GaussianSplattingPipeline(VanillaPipeline):
 
         image_dict.update(
             {
-                "Render": model_outputs["rgb"][0].float().permute(2, 0, 1),
-                "Target Image": batch["image"].permute(0, 3, 1, 2)[0].clamp(0, 1),
-                "Target Depth": batch["depth_image"].permute(0, 3, 1, 2)[0],
-                "Inpainting Mask": batch["inpainting_mask"].permute(0, 3, 1, 2)[0].float(),
-                "Inpainting Mask 2": batch["inpainting_mask_2"].permute(0, 3, 1, 2)[0].float(),
-                "Masked Render": (model_outputs["rgb"][0].float().permute(2, 0, 1))
-                * batch["inpainting_mask"].permute(0, 3, 1, 2)[0].float(),
-                "Inverse Masked Render": (model_outputs["rgb"][0].float().permute(2, 0, 1))
-                * (1 - batch["inpainting_mask"].permute(0, 3, 1, 2)[0].float()),
+                "Render (Sharp 3DGS)": self._to_image_tensor(misc.get("sharp_render", model_outputs["rgb"].permute(0, 2, 3, 1))),
+                "Render (Blurred via Kernel)": self._to_image_tensor(misc.get("blurred_render", model_outputs["rgb"].permute(0, 2, 3, 1))),
+                "Target Image": self._to_image_tensor(batch["image"]),
+                # "Target Depth": batch["depth_image"].permute(0, 3, 1, 2)[0].detach().cpu().numpy(),
             }
         )
 
-        if "one_step_pred" in misc.keys():
+        if "pseudo_gt" in misc.keys():
+            image_dict["Guidance (Sharp Pseudo-GT)"] = self._to_image_tensor(misc["pseudo_gt"])
 
-            image_dict.update({"One Step Pred": misc["one_step_pred"][0].float()})
+        if "kernel" in misc.keys():
+            k_img = misc["kernel"][0, 0].detach().cpu()
+            image_dict["Active Blur Kernel"] = self._to_image_tensor(k_img)
+
+        if "one_step_pred" in misc.keys():
+            image_dict["One Step Pred"] = self._to_image_tensor(misc["one_step_pred"][0])
 
         if "multi_step_pred" in misc.keys():
+            image_dict["Multi Step Pred"] = self._to_image_tensor(misc["multi_step_pred"][0])
 
-            image_dict.update({"Multi Step Pred": misc["multi_step_pred"][0].float()})
+       
+        # if get_image_dict:
+        #     model_outputs["depth_normalized"] = model_outputs["depth"].clone()
 
-        # Test inpainting
-        if step % self.config.guidance_eval_steps == 0 and get_image_dict:
-
-            if "sds_inpainting" in self.model.config.guidance:
-
-                inpainted_image, one_step = self.model.guidance.sample(
-                    rgb=model_outputs["rgb"],  # Shape (B, H, W, 3)
-                    ref_rgb=batch["image"],  # NEW: Your real indoor scan (low quality/blurry) - Shape (B, H, W, 3)
-                    prompt=self.config.prompt,
-                    mask=batch["inpainting_mask"].to(self.device),  # Shape (B, H, W, 1)
-                    strength=(
-                        1 - step / self.config.max_num_iterations
-                        if self.model.config.anneal
-                        else torch.rand(1).item() * 0.88 + 0.1
-                    ),
-                )
-
-                image_dict.update(
-                    {
-                        "Guidance Eval": inpainted_image[0],
-                    }
-                )
-
-            elif "sds" in self.model.config.guidance:
-
-                completed_image, one_step = self.model.guidance.sample(
-                    rgb=model_outputs["rgb"],  # Shape (B, H, W, 3)
-                    prompt=self.config.prompt,
-                    mask=batch["inpainting_mask"].to(self.device),  # Shape (B, H, W, 1)
-                    strength=(
-                        1 - step / self.config.max_num_iterations
-                        if self.model.config.anneal
-                        else torch.rand(1).item()
-                        * (self.model.config.max_step_percent - self.model.config.min_step_percent)
-                        + self.model.config.min_step_percent
-                    ),
-                )
-
-                image_dict.update(
-                    {
-                        "Guidance Eval": completed_image[0],
-                    }
-                )
-
-        # use matplot to log
-        if get_image_dict:
-
-            self.grad_norms.append(misc["grad"].norm(dim=1, keepdim=True).detach().cpu().numpy()[0, 0])
-
-            # Save the grad norm array
-            # print("Saving to", os.path.join(wandb.run.dir, 'grad_norms.npy'))
-            # np.save(os.path.join(wandb.run.dir, 'grad_norms.npy'), np.array(self.grad_norms))
-
-            # Log the gradient of the loss with respect to the image
-            fig = plt.figure()
-            plt.imshow(
-                misc["grad"].norm(dim=1, keepdim=True).detach().cpu().numpy()[0, 0],
-                cmap="gray",
-            )
-            grad_img = wandb.Image(fig)
-            grad_img = transforms.ToTensor()(grad_img.image)
-            plt.close()
-
-            # Log the GT depth image
-            fig = plt.figure()
-            plt.imshow(
-                batch["depth_image"].permute(0, 3, 1, 2)[0, 0].detach().cpu().numpy(),
-                cmap="turbo",
-            )
+        #     for key in ["depth", "rgb_loss_image", "depth_pred", "depth_normalized"]:
+        #         if key in model_outputs and key not in ["directions_norm", "eik_grad"]:
+        #             image_dict[key] = self._to_image_tensor(model_outputs[key][0])
+        #         elif key in batch:
+        #             image_dict[key] = self._to_image_tensor(batch[key][0])
+        #         elif key in misc:
+        #             image_dict[key] = self._to_image_tensor(misc[key][0])
+        
+        def create_depth_log(depth_tensor, vmin, vmax):
+            # Use a specific backend-friendly format
+            fig = plt.figure(figsize=(6, 6)) 
+            plt.imshow(depth_tensor.detach().cpu().numpy(), cmap="turbo", vmin=vmin, vmax=vmax)
             plt.colorbar()
-            depth_img = wandb.Image(fig)
-            depth_img = transforms.ToTensor()(depth_img.image)
-            plt.close()
+            plt.axis('off') # Optional: removes axis numbers for a cleaner look
 
-            image_dict.update(
-                {
-                    "Grad": grad_img,
-                    "Target Depth": depth_img,
-                }
-            )
+            # Draw the canvas
+            fig.canvas.draw()
+            
+            # Convert canvas to a numpy array (RGB)
+            # This avoids the channel issues with wandb.Image(fig)
+            img_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+            img_array = img_array.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            
+            plt.close(fig)
+            
+            # Return as a standard H W C image for the writer
+            return torch.from_numpy(img_array)
 
-            model_outputs["depth_normalized"] = model_outputs["depth"].clone()
+        gt_depth = batch["depth_image"][0, :, :, 0]
+        render_depth = model_outputs["depth"][0, :, :, 0]
+        
+        valid_gt_mask = gt_depth > 0
+        if valid_gt_mask.sum() > 0:
+            d_min, d_max = gt_depth[valid_gt_mask].min().item(), gt_depth[valid_gt_mask].max().item()
+        else:
+            d_min, d_max = 0.0, 1.0
 
-            for key in ["depth", "rgb_loss_image", "depth_pred", "depth_normalized"]:
-                if key in model_outputs and key not in ["directions_norm", "eik_grad"]:
-
-                    fig = plt.figure()
-
-                    if key != "depth" and key != "depth_pred":
-                        plt.imshow(
-                            model_outputs[key][0, :, :, :].detach().cpu().numpy(),
-                            cmap="turbo",
-                        )
-                    else:
-                        plt.imshow(
-                            model_outputs[key][0, :, :, 0].detach().cpu().numpy(),
-                            vmin=batch["depth_image"].min(),
-                            vmax=batch["depth_image"].max(),
-                            cmap="turbo",
-                        )
-                    plt.colorbar()
-
-                    img = wandb.Image(fig)
-                    img = transforms.ToTensor()(img.image)
-
-                    image_dict[key] = img
-                    plt.close()
-
-                elif key in batch:
-
-                    fig = plt.figure()
-
-                    if key != "depth":
-                        plt.imshow(batch[key][0, :, :, :].detach().cpu().numpy())
-                    else:
-                        plt.imshow(
-                            batch[key][0, :, :, 0].detach().cpu().numpy(),
-                            vmin=batch["depth_image"].min(),
-                            vmax=batch["depth_image"].max(),
-                            cmap="turbo",
-                        )
-                    plt.colorbar()
-
-                    img = wandb.Image(fig)
-                    img = transforms.ToTensor()(img.image)
-
-                    image_dict[key] = img
-                    plt.close()
-                elif key in misc:
-
-                    fig = plt.figure()
-
-                    if key != "depth" and key != "depth_pred":
-                        plt.imshow(misc[key][0, :, :, :].detach().cpu().numpy())
-                    else:
-                        plt.imshow(
-                            misc[key][0, :, :, 0].detach().cpu().numpy(),
-                            vmin=batch["depth_image"].min(),
-                            vmax=batch["depth_image"].max(),
-                            cmap="turbo",
-                        )
-                    plt.colorbar()
-
-                    img = wandb.Image(fig)
-                    img = transforms.ToTensor()(img.image)
-
-                    image_dict[key] = img
-                    plt.close()
+        image_dict["Target Depth"] = create_depth_log(gt_depth, d_min, d_max)
+        image_dict["Render Depth"] = create_depth_log(render_depth, d_min, d_max)
 
         # Convert to H, W, C
-        for key, value in image_dict.items():
-            image_dict[key] = value.permute(1, 2, 0)
+        # for key, value in image_dict.items():
+        #     image_dict[key] = value.permute(1, 2, 0)
 
         # if not get_image_dict:
         #     return model_outputs, loss_dict, metrics_dict, image_dict, gaussian_stats
 
-        combined_mask = misc["mask_rgb"]
+        # combined_mask = misc["mask_rgb"]
 
         # Move all tensors to GPU
         batch["image"] = batch["image"].to(self.device)
         model_outputs["rgb"] = model_outputs["rgb"].to(self.device)
 
         # Mask out the GT image ebfore computing the metrics
-        batch["image"] = batch["image"] * combined_mask
-        model_outputs["rgb"] = model_outputs["rgb"] * combined_mask
+        # batch["image"] = batch["image"] * combined_mask
+        # model_outputs["rgb"] = model_outputs["rgb"] * combined_mask
 
         # Compute metrics
         metrics_dict.update(self.model.get_metrics_dict(model_outputs, batch))
