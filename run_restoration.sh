@@ -36,20 +36,22 @@ command="ns-train realmdreamer --data "${scene_folder_path%/}" \
 --pipeline.model.guidance 'controlnet_tile' \
 --pipeline.model.deblur_enabled True \
 --pipeline.model.deblur_kernel_size 15 \
---pipeline.model.lambda_rgb 50.0 \
---pipeline.model.lambda_depth 10.0 \
+--pipeline.model.lambda_rgb 8000.0 \
+--pipeline.model.lambda_depth 1.0 \
 --pipeline.model.depth_guidance False \
 --pipeline.model.load_depth_guidance False \
 --pipeline.model.lambda_depth_sds 0.0 \
 --pipeline.model.lambda_sds 0.0 \
 --pipeline.model.lambda_one_step 5.0 \
 --pipeline.model.lambda_one_step_perceptual 100.0 \
---pipeline.model.max_step_percent 0.5 \
---pipeline.model.min_step_percent 0.1 \
+--pipeline.model.max_step_percent 0.98 \
+--pipeline.model.min_step_percent 0.25 \
 --pipeline.model.anneal True \
---optimizers.xyz.optimizer.lr 0.005 \
---optimizers.opacity.optimizer.lr 0.05 \
+--optimizers.xyz.optimizer.lr 0.01 \
+--optimizers.f-dc.optimizer.lr 0.001 \
+--optimizers.opacity.optimizer.lr 0.01 \
 --optimizers.scaling.optimizer.lr 0.005 \
+--optimizers.rotation.optimizer.lr 0.01 \
 --pipeline.model.pcd_path "${scene_folder_path}/pointcloud.ply" "
 
 echo $command

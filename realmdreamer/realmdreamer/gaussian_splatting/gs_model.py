@@ -19,6 +19,7 @@ from diff_gaussian_rasterization import (GaussianRasterizationSettings,
                                          GaussianRasterizer)
 from jaxtyping import Bool, Float
 from kornia.color.colormap import AUTUMN
+import kornia.losses as k_losses
 from kornia.enhance import sharpness
 from kornia.filters import gaussian_blur2d, laplacian
 from nerfstudio.cameras.rays import RayBundle, RaySamples
@@ -332,6 +333,8 @@ class GaussianSplatting(Model):
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
 
         self.lpips = lpips.LPIPS(net="vgg").to("cuda")
+        
+        self.ssim = MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0).to("cuda")
 
         # Diffusion Guidance
         self.diffusion_setup = True
@@ -623,29 +626,42 @@ class GaussianSplatting(Model):
     def masked_rgb_loss(self, image, gt, depth, mask):
         """Compute RGB loss on masked image."""
 
+        mask = mask.to(depth.device)
+        
         """
             Sometimes the rgb image will have holes in it, due to holes in point cloud and missing depth values - mask these out as well
         """
-
-        # Depth - B, H, W, 1
         mask_depth = (depth > 0) & ~mask
 
         if mask_depth.shape[1] != image.shape[1] or mask_depth.shape[2] != image.shape[2]:
-            # Erode the mask_depth before resizing
-            mask_depth = kornia.morphology.erosion(
-                mask_depth.permute(0, 3, 1, 2).float(),
-                torch.ones((5, 5)).to(mask_depth.device),
-            )  # B C H W
-            mask_depth = kornia.morphology.erosion(mask_depth, torch.ones((5, 5)).to(mask_depth.device))
+            # Erosion helps remove artifacts at the edges of the depth holes
+            mask_depth_tensor = mask_depth.permute(0, 3, 1, 2).float()
+            kernel = torch.ones((5, 5), device=depth.device)
+            mask_depth_tensor = kornia.morphology.erosion(mask_depth_tensor, kernel)
+            mask_depth_tensor = F.interpolate(mask_depth_tensor, size=(image.shape[1], image.shape[2]), mode="nearest")
+            mask_depth = mask_depth_tensor.bool().permute(0, 2, 3, 1)
 
-            mask_depth = F.interpolate(
-                mask_depth.float(),
-                size=(image.shape[1], image.shape[2]),
-                mode="nearest",
-            )
-            mask_depth = mask_depth.bool().permute(0, 2, 3, 1)  # B H W C
+        # Permute to B C H W for SSIM
+        img_bchw = image.permute(0, 3, 1, 2)
+        gt_bchw = gt.permute(0, 3, 1, 2)
+        # Create a 4D mask for B C H W compatibility
+        mask_bchw = mask_depth.permute(0, 3, 1, 2)
+        mask_bchw_expanded = mask_bchw.expand_as(img_bchw)
 
-        return self.rgb_loss(image * mask_depth, gt * mask_depth), mask_depth
+        # Standard 3DGS loss: 0.8 * L1 + 0.2 * D-SSIM
+        l1_loss = F.l1_loss(img_bchw[mask_bchw_expanded], gt_bchw[mask_bchw_expanded])
+        
+        # --- SSIM LOSS ---
+        # Note: SSIM needs the full image context, but we apply the mask to the result
+        # to ignore reconstruction errors in the 'hole' regions.
+        ssim_map = k_losses.ssim_loss(img_bchw, gt_bchw, window_size=11, reduction="none")
+        mask_ssim = mask_bchw.expand_as(ssim_map)
+        # SSIM map might be slightly smaller or channel-compressed depending on version, 
+        # so we mean-reduce only over valid pixels.
+        ssim_loss = ssim_map[mask_ssim].mean()
+
+        total_loss = 0.8 * l1_loss + 0.2 * ssim_loss
+        return total_loss, mask_depth
 
     def masked_depth_loss(self, depth, gt, mask):
         """Compute depth loss on masked depth."""
@@ -676,7 +692,7 @@ class GaussianSplatting(Model):
         misc["sharp_render"] = sharp_rendered_rgb_bhwc
         
         # 2. BLUR KERNEL (Starts at ratio 0.016 -> ~Step 500)
-        start_kernel_ratio = 0.20
+        start_kernel_ratio = 0.10
         if self.config.deblur_enabled and step_ratio > start_kernel_ratio: # Only start blurring after the scene has basic structure
             # 1. Get the image index and the corresponding kernel
             img_idx = batch["image_idx"] 
@@ -707,12 +723,12 @@ class GaussianSplatting(Model):
              # 5. Improved Regularization
             # Sparsity (L1) encourages a clean, sharp kernel (delta function)
             # TV loss encourages the kernel to be locally smooth (no salt-and-pepper noise)
-            loss_dict["loss_kernel_reg"] = torch.mean(torch.abs(raw_kernels)) * 0.001
+            loss_dict["loss_kernel_reg"] = torch.mean(torch.abs(raw_kernels)) * 0.00001
             
             # Center-weighting (Total Variation) to keep the kernel focused
             diff_h = torch.abs(curr_kernels[:, :, 1:, :] - curr_kernels[:, :, :-1, :]).mean()
             diff_w = torch.abs(curr_kernels[:, :, :, 1:] - curr_kernels[:, :, :, :-1]).mean()
-            loss_dict["loss_kernel_tv"] = (diff_h + diff_w) * 0.01
+            loss_dict["loss_kernel_tv"] = (diff_h + diff_w) * 0.001
         else:
             rendered_rgb_bhwc = sharp_rendered_rgb_bhwc
             misc["blurred_render"] = sharp_rendered_rgb_bhwc
@@ -735,10 +751,11 @@ class GaussianSplatting(Model):
             )
 
         # --- 3. THE PHYSICAL ANCHOR (Blurred RGB vs GT RGB) ---
-        loss_dict["loss_rgb"] = self.config.lambda_rgb * self.rgb_loss(rendered_rgb_bhwc, image)
-
+        loss_dict["loss_rgb"], mask_rgb_anchor = self.masked_rgb_loss(rendered_rgb_bhwc, image, batch["depth_image"].to(self.device), batch["inpainting_mask"])
+        loss_dict["loss_rgb"] = self.config.lambda_rgb * loss_dict["loss_rgb"]
+        
         # --- 4. THE DISTILLATION ANCHOR (Diffusion) ---
-        start_diff_ratio = 0.30
+        start_diff_ratio = 0.25
         if self.training and step_ratio > start_diff_ratio:
             # Pass SHARP render, GT RGB, and GT Depth to ControlNet
             pseudo_gt_sharp_bchw = self.guidance.multi_step(
