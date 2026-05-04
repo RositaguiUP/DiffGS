@@ -230,6 +230,20 @@ class GaussianSplattingModelConfig(ModelConfig):
     sharpen_in_post_factor: float = 1.0
     """Factor to sharpen the diffusion model predictions as post processing"""
 
+    # NEW PARAMETERS FOR RESTORATION:
+    
+    start_kernel_ratio: float = 0.10
+    """Step ratio to start learning the deblur kernel"""
+
+    start_diff_ratio: float = 0.25
+    """Step ratio to start the diffusion distillation"""
+
+    controlnet_tile_scale: float = 0.5
+    """Conditioning scale for ControlNet Tile (lower to prevent ghosting)"""
+
+    controlnet_depth_scale: float = 1.0
+    """Conditioning scale for ControlNet Depth"""
+    
     # IGNORE:
 
     inference_only: bool = False
@@ -691,9 +705,8 @@ class GaussianSplatting(Model):
         sharp_rendered_rgb_bchw = outputs["rgb"].clone()
         misc["sharp_render"] = sharp_rendered_rgb_bhwc
         
-        # 2. BLUR KERNEL (Starts at ratio 0.016 -> ~Step 500)
-        start_kernel_ratio = 0.10
-        if self.config.deblur_enabled and step_ratio > start_kernel_ratio: # Only start blurring after the scene has basic structure
+        # 2. BLUR KERNEL
+        if self.config.deblur_enabled and step_ratio > step_ratio > self.config.start_kernel_ratio:  # Only start blurring after the scene has basic structure
             # 1. Get the image index and the corresponding kernel
             img_idx = batch["image_idx"] 
             # Use the full batch of kernels
@@ -755,8 +768,13 @@ class GaussianSplatting(Model):
         loss_dict["loss_rgb"] = self.config.lambda_rgb * loss_dict["loss_rgb"]
         
         # --- 4. THE DISTILLATION ANCHOR (Diffusion) ---
-        start_diff_ratio = 0.25
-        if self.training and step_ratio > start_diff_ratio:
+        if self.training and step_ratio > self.config.start_diff_ratio:
+            # Pass scales down to guidance
+            self.guidance.cfg.controlnet_conditioning_scale =[
+                self.config.controlnet_tile_scale, 
+                self.config.controlnet_depth_scale
+            ]
+            
             # Pass SHARP render, GT RGB, and GT Depth to ControlNet
             pseudo_gt_sharp_bchw = self.guidance.multi_step(
                 rgb=sharp_rendered_rgb_bhwc,
@@ -777,8 +795,9 @@ class GaussianSplatting(Model):
 
         # Opaqueness Loss
         clamped_opacity = torch.clamp(self.gaussian_model.get_opacity, min=1e-5, max=1.0 - 1e-5)
-        loss_dict["loss_opaque"] = self.config.lambda_opaque * F.binary_cross_entropy(clamped_opacity, clamped_opacity)
-
+        # loss_dict["loss_opaque"] = self.config.lambda_opaque * F.binary_cross_entropy(clamped_opacity, clamped_opacity)
+        loss_dict["loss_opaque"] = self.config.lambda_opaque * torch.mean(clamped_opacity * (1.0 - clamped_opacity))
+        
         # Clean NaNs
         for key in loss_dict.keys():
             loss_dict[key] = torch.nan_to_num(loss_dict[key])

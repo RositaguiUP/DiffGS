@@ -45,13 +45,18 @@ command="ns-train realmdreamer --data "${scene_folder_path%/}" \
 --pipeline.model.lambda_one_step 5.0 \
 --pipeline.model.lambda_one_step_perceptual 100.0 \
 --pipeline.model.max_step_percent 0.98 \
---pipeline.model.min_step_percent 0.25 \
+--pipeline.model.min_step_percent 0.45 \
 --pipeline.model.anneal True \
+--pipeline.model.start_kernel_ratio 0.20 \
+--pipeline.model.start_diff_ratio 0.30 \
+--pipeline.model.controlnet_tile_scale 1.0 \
+--pipeline.model.controlnet_depth_scale 1.0 \
 --optimizers.xyz.optimizer.lr 0.01 \
 --optimizers.f-dc.optimizer.lr 0.001 \
 --optimizers.opacity.optimizer.lr 0.01 \
 --optimizers.scaling.optimizer.lr 0.005 \
 --optimizers.rotation.optimizer.lr 0.01 \
+--optimizers.deblur_kernels.optimizer.lr 0.01 \
 --pipeline.model.pcd_path "${scene_folder_path}/pointcloud.ply" "
 
 echo $command

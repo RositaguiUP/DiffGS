@@ -257,7 +257,10 @@ class GaussianSplattingPipeline(VanillaPipeline):
             d_min, d_max = 0.0, 1.0
 
         image_dict["Target Depth"] = create_depth_log(gt_depth, d_min, d_max)
-        image_dict["Render Depth"] = create_depth_log(render_depth, d_min, d_max)
+        
+        r_min, r_max = render_depth.min().item(), render_depth.max().item()
+        if r_max - r_min > 1e-5:
+            image_dict["Render Depth"] = create_depth_log(render_depth, r_min, r_max)
 
         # Convert to H, W, C
         # for key, value in image_dict.items():

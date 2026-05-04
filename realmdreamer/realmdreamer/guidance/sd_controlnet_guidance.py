@@ -19,8 +19,8 @@ class SDControlNetConfig:
     guidance_scale: float = 7.5
     controlnet_conditioning_scale: list =[1.0, 1.0] # [Tile, Depth]
     
-    min_step_percent: float = 0.05
-    max_step_percent: float = 0.60  # Max 60% noise to preserve room structure
+    min_step_percent: float = 0.25
+    max_step_percent: float = 0.98
     
     num_steps_sample: int = 20
 
@@ -31,7 +31,7 @@ class StableDiffusionControlNetGuidance(nn.Module):
         self.device = device
         self.weights_dtype = torch.float16 # FP16 for speed/VRAM
 
-        print("Loading ControlNets...")
+        print("Loading ControlNets (Tile + Depth)...")
         controlnet_tile = ControlNetModel.from_pretrained(
             self.cfg.tile_controlnet_path, torch_dtype=self.weights_dtype
         )
