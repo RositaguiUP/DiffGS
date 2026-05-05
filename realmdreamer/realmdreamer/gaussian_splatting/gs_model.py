@@ -324,9 +324,6 @@ class GaussianSplatting(Model):
     def populate_modules(self):
         super().populate_modules()
 
-        # Get scene name from pcd
-        scene_name = os.path.basename(os.path.dirname(self.config.pcd_path))
-
         # load gaussian model
         self.gaussian_model = self.config.gaussian_model.setup()
 
@@ -636,56 +633,25 @@ class GaussianSplatting(Model):
         metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
 
         return metrics_dict
+    
+    def get_rgb_loss(self, image, gt):
+        """Compute RGB loss on the full image, ignoring masks."""
 
-    def masked_rgb_loss(self, image, gt, depth, mask):
-        """Compute RGB loss on masked image."""
-
-        mask = mask.to(depth.device)
-        
-        """
-            Sometimes the rgb image will have holes in it, due to holes in point cloud and missing depth values - mask these out as well
-        """
-        mask_depth = (depth > 0) & ~mask
-
-        if mask_depth.shape[1] != image.shape[1] or mask_depth.shape[2] != image.shape[2]:
-            # Erosion helps remove artifacts at the edges of the depth holes
-            mask_depth_tensor = mask_depth.permute(0, 3, 1, 2).float()
-            kernel = torch.ones((5, 5), device=depth.device)
-            mask_depth_tensor = kornia.morphology.erosion(mask_depth_tensor, kernel)
-            mask_depth_tensor = F.interpolate(mask_depth_tensor, size=(image.shape[1], image.shape[2]), mode="nearest")
-            mask_depth = mask_depth_tensor.bool().permute(0, 2, 3, 1)
-
-        # Permute to B C H W for SSIM
+        # 1. Permute to B C H W (Standard format for most PyTorch/Kornia losses)
         img_bchw = image.permute(0, 3, 1, 2)
         gt_bchw = gt.permute(0, 3, 1, 2)
-        # Create a 4D mask for B C H W compatibility
-        mask_bchw = mask_depth.permute(0, 3, 1, 2)
-        mask_bchw_expanded = mask_bchw.expand_as(img_bchw)
 
-        # Standard 3DGS loss: 0.8 * L1 + 0.2 * D-SSIM
-        l1_loss = F.l1_loss(img_bchw[mask_bchw_expanded], gt_bchw[mask_bchw_expanded])
+        # 2. L1 Loss (Global)
+        l1_loss = F.l1_loss(img_bchw, gt_bchw, reduction="mean")
         
-        # --- SSIM LOSS ---
-        # Note: SSIM needs the full image context, but we apply the mask to the result
-        # to ignore reconstruction errors in the 'hole' regions.
-        ssim_map = k_losses.ssim_loss(img_bchw, gt_bchw, window_size=11, reduction="none")
-        mask_ssim = mask_bchw.expand_as(ssim_map)
-        # SSIM map might be slightly smaller or channel-compressed depending on version, 
-        # so we mean-reduce only over valid pixels.
-        ssim_loss = ssim_map[mask_ssim].mean()
+        # 3. SSIM Loss (Global)
+        # k_losses.ssim_loss returns (1 - SSIM), so it is a minimization objective
+        ssim_loss = k_losses.ssim_loss(img_bchw, gt_bchw, window_size=11, reduction="mean")
 
+        # 4. Standard 3DGS weighted combination
         total_loss = 0.8 * l1_loss + 0.2 * ssim_loss
-        return total_loss, mask_depth
 
-    def masked_depth_loss(self, depth, gt, mask):
-        """Compute depth loss on masked depth."""
-
-        mask_depth = (depth > 0) & ~mask
-
-        depth_masked = depth[mask_depth]
-        gt_masked = gt[mask_depth]
-
-        return F.mse_loss(depth_masked, gt_masked, reduction="sum") / depth_masked.numel()
+        return total_loss
 
     def get_loss_dict(self, outputs, batch, prompt, c2w, step_ratio):
 
@@ -695,7 +661,6 @@ class GaussianSplatting(Model):
 
         loss_dict = {}
         misc = {}
-        batch_size = batch["inpainting_mask"].shape[0]
 
         image = batch["image"].to("cuda")
         batch["depth_image"] = batch["depth_image"].float().to("cuda")
@@ -706,7 +671,7 @@ class GaussianSplatting(Model):
         misc["sharp_render"] = sharp_rendered_rgb_bhwc
         
         # 2. BLUR KERNEL
-        if self.config.deblur_enabled and step_ratio > step_ratio > self.config.start_kernel_ratio:  # Only start blurring after the scene has basic structure
+        if self.config.deblur_enabled and step_ratio > self.config.start_kernel_ratio:  # Only start blurring after the scene has basic structure
             # 1. Get the image index and the corresponding kernel
             img_idx = batch["image_idx"] 
             # Use the full batch of kernels
@@ -725,7 +690,6 @@ class GaussianSplatting(Model):
             
             # 4. Apply blur to the RENDERED image
             p = self.config.deblur_kernel_size // 2
-            
             
             blurred_rendered_rgb_bchw = F.conv2d(sharp_rendered_rgb_bchw, weight=kernel_rgb, padding=p, groups=3 * B)
             rendered_rgb_bhwc = blurred_rendered_rgb_bchw.permute(0, 2, 3, 1)
@@ -764,7 +728,7 @@ class GaussianSplatting(Model):
             )
 
         # --- 3. THE PHYSICAL ANCHOR (Blurred RGB vs GT RGB) ---
-        loss_dict["loss_rgb"], mask_rgb_anchor = self.masked_rgb_loss(rendered_rgb_bhwc, image, batch["depth_image"].to(self.device), batch["inpainting_mask"])
+        loss_dict["loss_rgb"] = self.get_rgb_loss(rendered_rgb_bhwc, image)
         loss_dict["loss_rgb"] = self.config.lambda_rgb * loss_dict["loss_rgb"]
         
         # --- 4. THE DISTILLATION ANCHOR (Diffusion) ---
@@ -788,14 +752,12 @@ class GaussianSplatting(Model):
             pseudo_gt_sharp_bchw = pseudo_gt_sharp_bchw.float()
             misc["pseudo_gt"] = pseudo_gt_sharp_bchw
             
-            
             # Pull the SHARP 3DGS render toward the Pseudo-GT
             loss_dict["loss_distill_mse"] = self.config.lambda_one_step * F.mse_loss(sharp_rendered_rgb_bchw, pseudo_gt_sharp_bchw)
             loss_dict["loss_distill_lpips"] = self.config.lambda_one_step_perceptual * self.lpips(sharp_rendered_rgb_bchw * 2 - 1, pseudo_gt_sharp_bchw * 2 - 1).mean()
 
         # Opaqueness Loss
         clamped_opacity = torch.clamp(self.gaussian_model.get_opacity, min=1e-5, max=1.0 - 1e-5)
-        # loss_dict["loss_opaque"] = self.config.lambda_opaque * F.binary_cross_entropy(clamped_opacity, clamped_opacity)
         loss_dict["loss_opaque"] = self.config.lambda_opaque * torch.mean(clamped_opacity * (1.0 - clamped_opacity))
         
         # Clean NaNs
@@ -814,9 +776,6 @@ class GaussianSplatting(Model):
         return filtered_state_dict
 
     def load_state_dict(self, model_dict, strict=True):
-
-        mask = self.gaussian_model.opacity_activation(model_dict["gaussian_model._opacity"]) < 0.95
-
         # Reinitialize the shape of all the gaussians
         self.gaussian_model.init_random(num_points=model_dict["gaussian_model._xyz"].shape[0])
         super().load_state_dict(model_dict, strict)

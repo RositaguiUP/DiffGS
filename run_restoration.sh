@@ -36,7 +36,7 @@ command="ns-train realmdreamer --data "${scene_folder_path%/}" \
 --pipeline.model.guidance 'controlnet_tile' \
 --pipeline.model.deblur_enabled True \
 --pipeline.model.deblur_kernel_size 15 \
---pipeline.model.lambda_rgb 8000.0 \
+--pipeline.model.lambda_rgb 10000.0 \
 --pipeline.model.lambda_depth 1.0 \
 --pipeline.model.depth_guidance False \
 --pipeline.model.load_depth_guidance False \
@@ -45,10 +45,10 @@ command="ns-train realmdreamer --data "${scene_folder_path%/}" \
 --pipeline.model.lambda_one_step 5.0 \
 --pipeline.model.lambda_one_step_perceptual 100.0 \
 --pipeline.model.max_step_percent 0.98 \
---pipeline.model.min_step_percent 0.45 \
+--pipeline.model.min_step_percent 0.25 \
 --pipeline.model.anneal True \
---pipeline.model.start_kernel_ratio 0.20 \
---pipeline.model.start_diff_ratio 0.30 \
+--pipeline.model.start_kernel_ratio 1.00 \
+--pipeline.model.start_diff_ratio 1.00 \
 --pipeline.model.controlnet_tile_scale 1.0 \
 --pipeline.model.controlnet_depth_scale 1.0 \
 --optimizers.xyz.optimizer.lr 0.01 \
