@@ -18,6 +18,7 @@ class SDControlNetConfig:
     
     guidance_scale: float = 7.5
     controlnet_conditioning_scale: list =[1.0, 1.0] # [Tile, Depth]
+    ip_adapter_scale: float = 0.5
     
     min_step_percent: float = 0.25
     max_step_percent: float = 0.98
@@ -46,6 +47,13 @@ class StableDiffusionControlNetGuidance(nn.Module):
             torch_dtype=self.weights_dtype,
             safety_checker=None,
         ).to(self.device)
+        
+        print("Loading IP-Adapter...")
+        self.pipe.load_ip_adapter(
+            "h94/IP-Adapter", 
+            subfolder="models", 
+            weight_name="ip-adapter_sd15.bin"
+        )
 
         # Optimize VRAM
         self.pipe.enable_xformers_memory_efficient_attention()
@@ -103,6 +111,16 @@ class StableDiffusionControlNetGuidance(nn.Module):
             ctrl_depth_512 = F.interpolate(ctrl_depth, (512, 512), mode="nearest")
         else:
             ctrl_depth_512 = ctrl_depth
+            
+        # IP-Adapter scale
+        self.pipe.set_ip_adapter_scale(self.cfg.ip_adapter_scale)
+        # Resize the reference image Standard SD1.5 IP-Adapters expect exactly 224x224
+        ip_adapter_input = F.interpolate(
+            ctrl_tile_512, 
+            (224, 224), 
+            mode="bilinear", 
+            align_corners=False
+        ).to(self.weights_dtype)
         
         # 3. Anneal the Timestep (Start high noise, end low noise)
         t = current_step_ratio * self.min_step + (1 - current_step_ratio) * self.max_step
@@ -115,6 +133,7 @@ class StableDiffusionControlNetGuidance(nn.Module):
             negative_prompt=["blurry, motion blur, out of focus, distorted, artifact, worst quality"] * batch_size,
             image=rgb_512.to(self.weights_dtype), 
             control_image=[ctrl_tile_512.to(self.weights_dtype), ctrl_depth_512.to(self.weights_dtype)],
+            ip_adapter_image=ip_adapter_input,
             controlnet_conditioning_scale=self.cfg.controlnet_conditioning_scale,
             strength=strength,
             num_inference_steps=self.cfg.num_steps_sample,

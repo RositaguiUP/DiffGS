@@ -37,7 +37,7 @@ command="ns-train realmdreamer --data "${scene_folder_path%/}" \
 --pipeline.model.deblur_enabled True \
 --pipeline.model.deblur_kernel_size 15 \
 --pipeline.model.lambda_rgb 10000.0 \
---pipeline.model.lambda_depth 1.0 \
+--pipeline.model.lambda_depth 5000.0 \
 --pipeline.model.depth_guidance False \
 --pipeline.model.load_depth_guidance False \
 --pipeline.model.lambda_depth_sds 0.0 \
@@ -47,10 +47,11 @@ command="ns-train realmdreamer --data "${scene_folder_path%/}" \
 --pipeline.model.max_step_percent 0.98 \
 --pipeline.model.min_step_percent 0.25 \
 --pipeline.model.anneal True \
---pipeline.model.start_kernel_ratio 1.00 \
---pipeline.model.start_diff_ratio 1.00 \
+--pipeline.model.start_kernel_ratio 1.3 \
+--pipeline.model.start_diff_ratio 1.3 \
 --pipeline.model.controlnet_tile_scale 1.0 \
 --pipeline.model.controlnet_depth_scale 1.0 \
+--pipeline.model.ip_adapter_scale 0.5 \
 --optimizers.xyz.optimizer.lr 0.01 \
 --optimizers.f-dc.optimizer.lr 0.001 \
 --optimizers.opacity.optimizer.lr 0.01 \

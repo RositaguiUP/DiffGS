@@ -244,6 +244,9 @@ class GaussianSplattingModelConfig(ModelConfig):
     controlnet_depth_scale: float = 1.0
     """Conditioning scale for ControlNet Depth"""
     
+    ip_adapter_scale: float = 0.5
+    """Conditioning scale for Ip Adapter"""
+    
     # IGNORE:
 
     inference_only: bool = False
@@ -721,11 +724,28 @@ class GaussianSplatting(Model):
             rendered_depth_bhwc = outputs["depth"]
 
         valid_depth_mask = batch["depth_image"] > 0
-        if valid_depth_mask.sum() > 0:
-            loss_dict["loss_depth"] = self.config.lambda_depth * F.l1_loss(
-                rendered_depth_bhwc[valid_depth_mask], 
-                batch["depth_image"].to(self.device)[valid_depth_mask]
-            )
+        # We need at least a handful of valid pixels to compute a meaningful correlation
+        if valid_depth_mask.sum() > 10:
+            # Extract only the valid depth pixels into 1D tensors
+            rend_d = rendered_depth_bhwc[valid_depth_mask]
+            gt_d = batch["depth_image"].to(self.device)[valid_depth_mask]
+            
+            # Center the data around their respective means (this removes the shift)
+            rend_centered = rend_d - rend_d.mean()
+            gt_centered = gt_d - gt_d.mean()
+            
+            # Compute Covariance and Standard Deviations (Scale Invariance)
+            cov = (rend_centered * gt_centered).sum()
+            std_rend = torch.sqrt((rend_centered ** 2).sum() + 1e-8)
+            std_gt = torch.sqrt((gt_centered ** 2).sum() + 1e-8)
+            
+            # Pearson Correlation Coefficient (r is between -1 and 1)
+            pearson_corr = cov / (std_rend * std_gt)
+            
+            # Loss is minimized (0.0) when correlation is perfect (1.0)
+            loss_dict["loss_depth"] = self.config.lambda_depth * (1.0 - pearson_corr)
+        else:
+            loss_dict["loss_depth"] = torch.tensor(0.0, device=self.device)
 
         # --- 3. THE PHYSICAL ANCHOR (Blurred RGB vs GT RGB) ---
         loss_dict["loss_rgb"] = self.get_rgb_loss(rendered_rgb_bhwc, image)
@@ -738,6 +758,7 @@ class GaussianSplatting(Model):
                 self.config.controlnet_tile_scale, 
                 self.config.controlnet_depth_scale
             ]
+            self.guidance.cfg.ip_adapter_scale = self.config.ip_adapter_scale
             
             # Pass SHARP render, GT RGB, and GT Depth to ControlNet
             pseudo_gt_sharp_bchw = self.guidance.multi_step(
