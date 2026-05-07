@@ -341,8 +341,11 @@ class GaussianSplattingTrainer(Trainer):
         # possibly delete old checkpoints
         if self.config.save_only_latest_checkpoint:
             # delete everything else in the checkpoint folder
+            milestones = [8000-1, 15000-1, 8000, 15000]
+            protected_files = [f"step-{m:09d}.ckpt" for m in milestones]
+            
             for f in self.checkpoint_dir.glob("*"):
-                if f != ckpt_path:
+                if f != ckpt_path and f.name not in protected_files:
                     f.unlink()
 
     # Save the code that is used

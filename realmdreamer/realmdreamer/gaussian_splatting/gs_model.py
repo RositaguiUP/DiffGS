@@ -160,6 +160,9 @@ class GaussianSplattingModelConfig(ModelConfig):
 
     lambda_rgb: float = 1000.0
     """Multiplier for RGB loss."""
+    
+    target_rgb_loss: float = 100.0
+    """Target multiplier for RGB loss."""
 
     lambda_depth: float = 0.0
     """Multiplier for depth loss."""
@@ -747,9 +750,29 @@ class GaussianSplatting(Model):
         else:
             loss_dict["loss_depth"] = torch.tensor(0.0, device=self.device)
 
+        
+        # --- NEW: DYNAMIC SCHEDULING (Activates strictly AFTER start_diff_ratio) ---
+         # Calculate transition progress (0.0 means not started, 1.0 means handoff complete)
+        # Using a 2,000 step window out of 30,000 total steps = ratio of ~0.0667
+        transition_ratio = 2000.0 / 30000.0 
+        
+
+        if step_ratio >= self.config.start_diff_ratio:
+            # Calculate how far we are into the diffusion phase (0.0 to 1.0)
+            diff_progress = min(1.0, (step_ratio - self.config.start_diff_ratio) / transition_ratio)
+        else:
+            diff_progress = 0.0
+            
+        # 1. Exponential decay for RGB loss (10000.0 -> 1000.0)
+        current_lambda_rgb = self.config.lambda_rgb * (self.config.target_rgb_loss / self.config.lambda_rgb) ** diff_progress
+        
+        # 2. Linear warmup for Distillation losses (0.0 -> Max)
+        current_lambda_mse = self.config.lambda_one_step * diff_progress
+        current_lambda_lpips = self.config.lambda_one_step_perceptual * diff_progress
+        
         # --- 3. THE PHYSICAL ANCHOR (Blurred RGB vs GT RGB) ---
         loss_dict["loss_rgb"] = self.get_rgb_loss(rendered_rgb_bhwc, image)
-        loss_dict["loss_rgb"] = self.config.lambda_rgb * loss_dict["loss_rgb"]
+        loss_dict["loss_rgb"] = current_lambda_rgb  * loss_dict["loss_rgb"]
         
         # --- 4. THE DISTILLATION ANCHOR (Diffusion) ---
         if self.training and step_ratio > self.config.start_diff_ratio:
@@ -774,8 +797,8 @@ class GaussianSplatting(Model):
             misc["pseudo_gt"] = pseudo_gt_sharp_bchw
             
             # Pull the SHARP 3DGS render toward the Pseudo-GT
-            loss_dict["loss_distill_mse"] = self.config.lambda_one_step * F.mse_loss(sharp_rendered_rgb_bchw, pseudo_gt_sharp_bchw)
-            loss_dict["loss_distill_lpips"] = self.config.lambda_one_step_perceptual * self.lpips(sharp_rendered_rgb_bchw * 2 - 1, pseudo_gt_sharp_bchw * 2 - 1).mean()
+            loss_dict["loss_distill_mse"] = current_lambda_mse * F.mse_loss(sharp_rendered_rgb_bchw, pseudo_gt_sharp_bchw)
+            loss_dict["loss_distill_lpips"] = current_lambda_lpips * self.lpips(sharp_rendered_rgb_bchw * 2 - 1, pseudo_gt_sharp_bchw * 2 - 1).mean()
 
         # Opaqueness Loss
         clamped_opacity = torch.clamp(self.gaussian_model.get_opacity, min=1e-5, max=1.0 - 1e-5)

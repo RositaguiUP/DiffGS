@@ -46,10 +46,10 @@ realmdreamer = MethodSpecification(
                 "optimizer": AdamOptimizerConfig(lr=0.01, eps=1e-15),
                 # "scheduler": None,
                 "scheduler": ExponentialDecaySchedulerConfig(
-                    warmup_steps=5000,
+                    warmup_steps=3000,
                     lr_pre_warmup=0.01,
-                    lr_final=0.000005,
-                    max_steps=10000,
+                    lr_final=0.0001,
+                    max_steps=30000,
                 ),
             },
             "f_dc": {
@@ -69,10 +69,10 @@ realmdreamer = MethodSpecification(
                 "optimizer": AdamOptimizerConfig(lr=0.005, eps=1e-15),
                 # "scheduler": None,
                 "scheduler": ExponentialDecaySchedulerConfig(
-                    warmup_steps=7000,
+                    warmup_steps=5000,
                     lr_pre_warmup=0.005,
                     lr_final=0.0001,
-                    max_steps=10000,
+                    max_steps=30000,
                 ),
             },
             "rotation": {
