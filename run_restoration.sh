@@ -53,9 +53,9 @@ command="ns-train realmdreamer --data "${scene_folder_path%/}" \
 --pipeline.model.controlnet_tile_scale 0.85 \
 --pipeline.model.controlnet_depth_scale 1.0 \
 --pipeline.model.ip_adapter_scale 0.5 \
---optimizers.xyz.optimizer.lr 0.01 \
+--optimizers.xyz.optimizer.lr 0.001 \
 --optimizers.f-dc.optimizer.lr 0.001 \
---optimizers.opacity.optimizer.lr 0.01 \
+--optimizers.opacity.optimizer.lr 0.05 \
 --optimizers.scaling.optimizer.lr 0.005 \
 --optimizers.rotation.optimizer.lr 0.01 \
 --optimizers.deblur_kernels.optimizer.lr 0.01 \

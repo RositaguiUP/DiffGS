@@ -11,8 +11,8 @@ from rich import print
 # Custom project imports
 from inputs_generator.src.v3dc_io import read_v3dc_sliced
 from inputs_generator.src.environment import Environment
-from inputs_generator.src.deblur_utils import MotionDeblurer
-from inputs_generator.src.renderer_v2 import Renderer
+# from inputs_generator.src.deblur_utils import MotionDeblurer
+# from inputs_generator.src.renderer_v2 import Renderer
 
 class Generator:
     def __init__(self, env_id, floor_number, output_path):
@@ -76,7 +76,7 @@ class Generator:
     def run(self, img_size=512, dist_thresh=0.15, rot_thresh=10.0, blur_thresh=15.0, step=1):
         # --- STEP 1: FILTERING & SCAN EXTRACTION ---
         print("[bold blue]Starting Step 1: Filtering & Extraction...[/bold blue]")
-        deblurrer = MotionDeblurer()
+        # deblurrer = MotionDeblurer()
         
         scan_to_mesh = np.loadtxt(self.env.path_sub_pano(self.floor_number)).reshape(4, 4)
         mesh_to_scan = np.linalg.inv(scan_to_mesh)
@@ -108,7 +108,7 @@ class Generator:
 
         # --- STEP 2: Processing, Rendering & Mask Generation ---
         print("[bold blue]Starting Step 2: Processing, Rendering & Mask Generation...[/bold blue]")
-        renderer = Renderer(env_id=self.env_id, floor_number=self.floor_number)
+        # renderer = Renderer(env_id=self.env_id, floor_number=self.floor_number)
         
         # Prepare for final JSON
         json_data = {
@@ -123,7 +123,8 @@ class Generator:
             idx = frame["id"]
             
             # Process Scan RGB/Depth
-            rgb_clean = deblurrer.process(frame["view"]["img"])
+            # rgb_clean = deblurrer.process(frame["view"]["img"])
+            rgb_clean = frame["view"]["img"]
             depth_m = frame["view"]["depth"].astype(np.float32) / 1000.0
             rgb_f, scan_depth_f = self._preprocess_data(rgb_clean, depth_m, img_size)
             
@@ -133,23 +134,24 @@ class Generator:
             self._save_depth_visualization(idx, scan_depth_f, self.depth_dir)
 
             # Render Mesh Depth
-            cam = renderer.extrinsics_to_cameras(frame["w2c"][None], frame["view"]["K"][None], (frame["view"]["height"], frame["view"]["width"]))
-            mesh_rgb, mesh_depth = renderer.render_rgb_depth(cameras=cam, imsize=[img_size, img_size])
-            if mesh_rgb.dtype != np.uint8:
-                mesh_rgb = (np.clip(mesh_rgb, 0, 1) * 255).astype(np.uint8)
-            cv2.imwrite(str(self.mesh_rgb_dir / f"{idx:05d}.png"), cv2.cvtColor(mesh_rgb, cv2.COLOR_RGB2BGR))
-            np.save(self.mesh_depth_dir / f"{idx:05d}.npy", mesh_depth)
-            self._save_depth_visualization(idx, mesh_depth, self.mesh_depth_dir)
+            # cam = renderer.extrinsics_to_cameras(frame["w2c"][None], frame["view"]["K"][None], (frame["view"]["height"], frame["view"]["width"]))
+            # mesh_rgb, mesh_depth = renderer.render_rgb_depth(cameras=cam, imsize=[img_size, img_size])
+            # if mesh_rgb.dtype != np.uint8:
+            #     mesh_rgb = (np.clip(mesh_rgb, 0, 1) * 255).astype(np.uint8)
+            # cv2.imwrite(str(self.mesh_rgb_dir / f"{idx:05d}.png"), cv2.cvtColor(mesh_rgb, cv2.COLOR_RGB2BGR))
+            # np.save(self.mesh_depth_dir / f"{idx:05d}.npy", mesh_depth)
+            # self._save_depth_visualization(idx, mesh_depth, self.mesh_depth_dir)
             
             # 0 = hole/inpaint, 1 = keep
-            mask = (scan_depth_f <= 0) | (mesh_depth <= 0)
+            mask = (scan_depth_f <= 0) #| (mesh_depth <= 0)
             mask_img = (1 - mask.astype(np.uint8)) * 255
             Image.fromarray(mask_img).save(self.mask_dir / f"{idx:05d}.png")
 
             # Update JSON
-            # Convert W2C Mesh to OpenGL C2W
+            # Convert W2C Scan to OpenGL C2W
+            w2c_scan = frame["view"]["viewmat"]
             gl_transform = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
-            c2w_gl = np.linalg.inv(gl_transform @ frame["w2c"])
+            c2w_gl = np.linalg.inv(gl_transform @ w2c_scan)
             
             json_data["frames"].append({
                 "id": idx,

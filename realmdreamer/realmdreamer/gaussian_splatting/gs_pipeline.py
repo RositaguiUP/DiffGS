@@ -53,7 +53,7 @@ class GaussianSplattingPipelineConfig(VanillaPipelineConfig):
     density_end_iter: int = 999999999
     """End densification at this iteration"""
 
-    densification_interval: int = 1000
+    densification_interval: int = 100
     """Densify and prune every this many iterations"""
 
     densify_grad_threshold: float = 0.0002
@@ -257,6 +257,20 @@ class GaussianSplattingPipeline(VanillaPipeline):
             d_min, d_max = 0.0, 1.0
 
         image_dict["Target Depth"] = create_depth_log(gt_depth, d_min, d_max)
+        
+        
+        target_depth_rescaled = model_outputs["target_depth_rescaled"][0, :, :, 0]
+        valid_gt_mask = target_depth_rescaled > 0
+
+        # 1. Determine Visualization Bounds
+        if valid_gt_mask.sum() > 0:
+            # Use the rescaled values for the bounds (e.g., 0.5m to 4.5m)
+            d_min = target_depth_rescaled[valid_gt_mask].min().item()
+            d_max = target_depth_rescaled[valid_gt_mask].max().item()
+        else:
+            d_min, d_max = 0.0, 5.0 # Fallback to a standard 5-meter room scale
+                
+        image_dict["Target Depth Rescaled"] = create_depth_log(target_depth_rescaled, d_min, d_max)
         
         r_min, r_max = render_depth.min().item(), render_depth.max().item()
         if r_max - r_min > 1e-5:

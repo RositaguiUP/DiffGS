@@ -723,15 +723,21 @@ class GaussianSplatting(Model):
         rendered_depth_bhwc = outputs["depth"]
         # Match dimensions if needed
         if rendered_depth_bhwc.shape[1:3] != batch["depth_image"].shape[1:3]:
-            outputs["depth"] = F.interpolate(outputs["depth"].permute(0,3,1,2), size=batch["depth_image"].shape[1:3], mode="nearest").permute(0,2,3,1)
+            outputs["depth"] = F.interpolate(outputs["depth"].permute(0,3,1,2), size=batch["depth_image"].shape[1:3], mode="bilinear", align_corners=False).permute(0,2,3,1)
             rendered_depth_bhwc = outputs["depth"]
-
+            
+        # CRITICAL FIX: Scale Ground Truth from millimeters (0.004) to meters (4.0)
+        # This aligns the GT metric scale with the Render metric scale.
+        # This prevents vanishing gradients and floating-point precision errors.
+        gt_depth_meters = batch["depth_image"].to(self.device) * 1000.0
+        outputs["target_depth_rescaled"] = gt_depth_meters
+        
         valid_depth_mask = batch["depth_image"] > 0
         # We need at least a handful of valid pixels to compute a meaningful correlation
         if valid_depth_mask.sum() > 10:
             # Extract only the valid depth pixels into 1D tensors
             rend_d = rendered_depth_bhwc[valid_depth_mask]
-            gt_d = batch["depth_image"].to(self.device)[valid_depth_mask]
+            gt_d = gt_depth_meters[valid_depth_mask]
             
             # Center the data around their respective means (this removes the shift)
             rend_centered = rend_d - rend_d.mean()

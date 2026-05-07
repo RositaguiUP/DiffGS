@@ -1,0 +1,11 @@
+scene_name: '6VSV7_695_v1_1'
+base_img_path: ''
+debug: true
+
+prompt: '4k image, photorealistic, cinematic lighting, sharp, high resolution, highly detailed texture'
+aux_prompt: ''
+depth_estimator:
+  mode: "indoor"
+
+env_id: '6VSV7_695'
+floor_number: '0' 

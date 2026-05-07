@@ -47,7 +47,7 @@ realmdreamer = MethodSpecification(
                 # "scheduler": None,
                 "scheduler": ExponentialDecaySchedulerConfig(
                     warmup_steps=3000,
-                    lr_pre_warmup=0.01,
+                    lr_pre_warmup=0.001,
                     lr_final=0.0001,
                     max_steps=30000,
                 ),
