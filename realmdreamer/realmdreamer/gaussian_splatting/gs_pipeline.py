@@ -56,13 +56,13 @@ class GaussianSplattingPipelineConfig(VanillaPipelineConfig):
     densification_interval: int = 100
     """Densify and prune every this many iterations"""
 
-    densify_grad_threshold: float = 0.0002
+    densify_grad_threshold: float = 0.00003
     """Densify if the gradient is above this threshold"""
 
     enable_prune: bool = True
     """Enable pruning"""
 
-    opacity_reset_interval: int = 3000
+    opacity_reset_interval: int = 6000
     """Reset opacity every this many iterations"""
 
     input_view_constraint: bool = False
