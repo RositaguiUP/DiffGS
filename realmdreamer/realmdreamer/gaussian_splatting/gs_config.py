@@ -47,9 +47,9 @@ realmdreamer = MethodSpecification(
                 # "scheduler": None,
                 "scheduler": ExponentialDecaySchedulerConfig(
                     warmup_steps=1000,
-                    lr_pre_warmup=0.0008,
-                    lr_final=0.0001,
-                    max_steps=30000,
+                    lr_pre_warmup=0.00016,
+                    lr_final=0.000016,
+                    max_steps=15000,
                 ),
             },
             "f_dc": {
@@ -67,13 +67,13 @@ realmdreamer = MethodSpecification(
             },
             "scaling": {
                 "optimizer": AdamOptimizerConfig(lr=0.005, eps=1e-15),
-                # "scheduler": None,
-                "scheduler": ExponentialDecaySchedulerConfig(
-                    warmup_steps=3000,
-                    lr_pre_warmup=0.007,
-                    lr_final=0.0001,
-                    max_steps=30000,
-                ),
+                "scheduler": None,
+                # "scheduler": ExponentialDecaySchedulerConfig(
+                #     warmup_steps=3000,
+                #     lr_pre_warmup=0.004,
+                #     lr_final=0.0001,
+                #     max_steps=15000,
+                # ),
             },
             "rotation": {
                 "optimizer": AdamOptimizerConfig(lr=0.01, eps=1e-15, weight_decay=0),
@@ -122,9 +122,9 @@ realmdreamer_finetune = MethodSpecification(
                 # "scheduler": None,
                 "scheduler": ExponentialDecaySchedulerConfig(
                     warmup_steps=750,
-                    lr_pre_warmup=0.0002,
-                    lr_final=0.00000005,
-                    max_steps=3000,
+                    lr_pre_warmup=0.0004,
+                    lr_final=0.00005,
+                    max_steps=15000,
                 ),
             },
             "f_dc": {
@@ -141,8 +141,12 @@ realmdreamer_finetune = MethodSpecification(
             },
             "scaling": {
                 "optimizer": AdamOptimizerConfig(lr=0.0001, eps=1e-15),
-                "scheduler": None,
-                # "scheduler": ExponentialDecaySchedulerConfig(warmup_steps=5000, lr_pre_warmup=0.0001, lr_final=0.00000001, max_steps=15000),
+                "scheduler": ExponentialDecaySchedulerConfig(
+                    warmup_steps=1000,
+                    lr_pre_warmup=0.002,
+                    lr_final=0.00005,
+                    max_steps=15000,
+                ),
             },
             "rotation": {
                 "optimizer": AdamOptimizerConfig(lr=0.01, eps=1e-15, weight_decay=0),
@@ -160,5 +164,5 @@ realmdreamer_finetune = MethodSpecification(
         viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
         vis="viewer",
     ),
-    description="Realmdreamer for Finetuning",
+    description="Realmdreamer for Distillation",
 )

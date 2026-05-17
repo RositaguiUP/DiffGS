@@ -183,8 +183,9 @@ class GaussianSplattingPipeline(VanillaPipeline):
             outputs=model_outputs,
             batch=batch,
             prompt=self.config.prompt,
-            c2w=c2w,
+            step=step,
             step_ratio=step / self.config.max_num_iterations,
+            max_num_iterations=self.config.max_num_iterations,
         )
         end_loss = time.time()
 

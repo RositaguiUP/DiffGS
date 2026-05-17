@@ -160,9 +160,6 @@ class GaussianSplattingModelConfig(ModelConfig):
 
     lambda_rgb: float = 1000.0
     """Multiplier for RGB loss."""
-    
-    target_rgb_loss: float = 100.0
-    """Target multiplier for RGB loss."""
 
     lambda_depth: float = 0.0
     """Multiplier for depth loss."""
@@ -233,6 +230,26 @@ class GaussianSplattingModelConfig(ModelConfig):
     sharpen_in_post_factor: float = 1.0
     """Factor to sharpen the diffusion model predictions as post processing"""
 
+    # NEW PARAMETERS FOR SCHEDULING:
+    
+    lambda_rgb_final: float = 1000.0
+    """Target multiplier for RGB loss."""
+    
+    lambda_depth_final: float = 0.0
+    """Target multiplier for depth loss."""
+    
+    rgb_start_step: int = 2000
+    """Step to start decay RGB loss from lambda_rgb to lambda_rgb_final"""
+    
+    depth_start_step: int = 5000
+    """Step to start decay depth loss from lambda_depth to lambda_depth_final"""
+    
+    rgb_lock_step: int = 13000
+    """Step to stop decay RGB loss from lambda_rgb to lambda_rgb_final"""
+    
+    depth_lock_step: int = 13000
+    """Step to stop decay depth loss from lambda_depth to lambda_depth_final"""
+    
     # NEW PARAMETERS FOR RESTORATION:
     
     start_kernel_ratio: float = 0.10
@@ -653,13 +670,15 @@ class GaussianSplatting(Model):
         # 3. SSIM Loss (Global)
         # k_losses.ssim_loss returns (1 - SSIM), so it is a minimization objective
         ssim_loss = k_losses.ssim_loss(img_bchw, gt_bchw, window_size=11, reduction="mean")
+        
+        lambda_gs_l1 = 0.7
 
         # 4. Standard 3DGS weighted combination
-        total_loss = 0.8 * l1_loss + 0.2 * ssim_loss
+        total_loss = lambda_gs_l1 * l1_loss + (1-lambda_gs_l1) * ssim_loss
 
         return total_loss
 
-    def get_loss_dict(self, outputs, batch, prompt, c2w, step_ratio):
+    def get_loss_dict(self, outputs, batch, prompt, step, step_ratio, max_num_iterations = 15000):
 
         if not self.diffusion_setup:
             self.setup_diffusion()
@@ -670,6 +689,35 @@ class GaussianSplatting(Model):
 
         image = batch["image"].to("cuda")
         batch["depth_image"] = batch["depth_image"].float().to("cuda")
+        
+        # --- 0. DYNAMIC SCHEDULING LOGIC ---
+        # RGB Lambda Schedule
+        if step < self.config.rgb_start_step:
+            current_lambda_rgb = self.config.lambda_rgb
+        elif step < self.config.rgb_lock_step:
+            # Linear Interpolation: lambda_rgb -> lambda_rgb_final
+            ratio = (step - self.config.rgb_start_step) / (self.config.rgb_lock_step - self.config.rgb_start_step)
+            current_lambda_rgb = self.config.lambda_rgb + ratio * (self.config.lambda_rgb_final - self.config.lambda_rgb)
+        else:
+            current_lambda_rgb = self.config.lambda_rgb_final
+
+        # Depth Lambda Schedule
+        if step < self.config.depth_start_step:
+            current_lambda_depth = self.config.lambda_depth
+        elif step < self.config.depth_lock_step:
+            # Linear Interpolation: lambda_depth -> lambda_depth_final
+            ratio = (step - self.config.depth_start_step) / (self.config.depth_lock_step - self.config.depth_start_step)
+            current_lambda_depth = self.config.lambda_depth + ratio * (self.config.lambda_depth_final - self.config.lambda_depth)
+        else:
+            current_lambda_depth = self.config.lambda_depth_final
+
+        # --- 1. THE POSITION LOCK (Triggered exactly at lock step) ---
+        # if step ==self.config.depth_lock_step:
+        #     print(f"\n[Step {step}] >>> GEOMETRY LOCK ACTIVATED <<<")
+        #     print(f"Zeroing Depth Loss and reducing Positional LR for high-frequency refinement.")
+        #     for group in self.gaussian_model.optimizer.param_groups:
+        #         if group["name"] == "means":
+        #             group["lr"] *= 0.1  # Drop LR by 10x to stop geometry from drifting
             
         # 1. SHARP RENDERS
         sharp_rendered_rgb_bhwc = outputs["rgb"].permute(0, 2, 3, 1).clone()
@@ -726,15 +774,12 @@ class GaussianSplatting(Model):
             outputs["depth"] = F.interpolate(outputs["depth"].permute(0,3,1,2), size=batch["depth_image"].shape[1:3], mode="bilinear", align_corners=False).permute(0,2,3,1)
             rendered_depth_bhwc = outputs["depth"]
             
-        # CRITICAL FIX: Scale Ground Truth from millimeters (0.004) to meters (4.0)
-        # This aligns the GT metric scale with the Render metric scale.
-        # This prevents vanishing gradients and floating-point precision errors.
-        gt_depth_meters = batch["depth_image"].to(self.device) * 1000.0
+        gt_depth_meters = batch["depth_image"].to(self.device)
         outputs["target_depth_rescaled"] = gt_depth_meters
         
         valid_depth_mask = batch["depth_image"] > 0
         # We need at least a handful of valid pixels to compute a meaningful correlation
-        if valid_depth_mask.sum() > 10:
+        if valid_depth_mask.sum() > 10 and current_lambda_depth > 0:
             # Extract only the valid depth pixels into 1D tensors
             rend_d = rendered_depth_bhwc[valid_depth_mask]
             gt_d = gt_depth_meters[valid_depth_mask]
@@ -752,16 +797,20 @@ class GaussianSplatting(Model):
             pearson_corr = cov / (std_rend * std_gt)
             
             # Loss is minimized (0.0) when correlation is perfect (1.0)
-            loss_dict["loss_depth"] = self.config.lambda_depth * (1.0 - pearson_corr)
+            loss_dict["loss_depth"] = current_lambda_depth * (1.0 - pearson_corr)
         else:
             loss_dict["loss_depth"] = torch.tensor(0.0, device=self.device)
 
         
+        # --- 3. THE PHYSICAL ANCHOR (Blurred RGB vs GT RGB) ---
+        loss_dict["loss_rgb"] = current_lambda_rgb  * self.get_rgb_loss(rendered_rgb_bhwc, image)
+        
+        
+        
         # --- NEW: DYNAMIC SCHEDULING (Activates strictly AFTER start_diff_ratio) ---
          # Calculate transition progress (0.0 means not started, 1.0 means handoff complete)
         # Using a 2,000 step window out of 30,000 total steps = ratio of ~0.0667
-        transition_ratio = 2000.0 / 30000.0 
-        
+        transition_ratio = 5000.0 / max_num_iterations
 
         if step_ratio >= self.config.start_diff_ratio:
             # Calculate how far we are into the diffusion phase (0.0 to 1.0)
@@ -769,16 +818,11 @@ class GaussianSplatting(Model):
         else:
             diff_progress = 0.0
             
-        # 1. Exponential decay for RGB loss (10000.0 -> 1000.0)
-        current_lambda_rgb = self.config.lambda_rgb * (self.config.target_rgb_loss / self.config.lambda_rgb) ** diff_progress
-        
         # 2. Linear warmup for Distillation losses (0.0 -> Max)
-        current_lambda_mse = self.config.lambda_one_step * diff_progress
-        current_lambda_lpips = self.config.lambda_one_step_perceptual * diff_progress
+        current_lambda_mse = self.config.lambda_one_step #* diff_progress
+        current_lambda_lpips = self.config.lambda_one_step_perceptual #* diff_progress
         
-        # --- 3. THE PHYSICAL ANCHOR (Blurred RGB vs GT RGB) ---
-        loss_dict["loss_rgb"] = self.get_rgb_loss(rendered_rgb_bhwc, image)
-        loss_dict["loss_rgb"] = current_lambda_rgb  * loss_dict["loss_rgb"]
+    
         
         # --- 4. THE DISTILLATION ANCHOR (Diffusion) ---
         if self.training and step_ratio > self.config.start_diff_ratio:
