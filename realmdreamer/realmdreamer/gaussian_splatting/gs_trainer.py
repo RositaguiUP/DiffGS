@@ -120,9 +120,6 @@ class GaussianSplattingTrainer(Trainer):
 
         self._init_viewer_state()
 
-        # Initialise the model - inpaint all holes somehow just for initialization purposes
-        # self.pipeline.inpaint_all_holes()
-
         try:
             with TimeWriter(writer, EventName.TOTAL_TRAIN_TIME):
                 num_iterations = self.config.max_num_iterations

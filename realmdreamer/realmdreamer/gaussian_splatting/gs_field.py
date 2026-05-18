@@ -1,6 +1,4 @@
 import copy
-import math
-import pdb
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Literal, NamedTuple, Optional, Tuple, Type
@@ -8,10 +6,8 @@ from typing import Dict, List, Literal, NamedTuple, Optional, Tuple, Type
 import numpy as np
 import open3d as o3d
 import torch
-from nerfstudio.fields.base_field import (Field, FieldConfig,
-                                          get_normalized_directions)
+from nerfstudio.fields.base_field import Field, FieldConfig
 from nerfstudio.utils.rich_utils import CONSOLE
-from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from torch import Tensor, nn
 
@@ -88,7 +84,6 @@ class GaussianSplattingField(Field):
     def load_pcd(
         self,
         path,
-        occluded_rand_init=False,
         init_requires_grad=True,
         auto_scale=True,
         device="cuda",
@@ -104,8 +99,6 @@ class GaussianSplattingField(Field):
 
         self.device = device
 
-        import open3d as o3d
-
         print("Loading PCD file : ", path)
 
         if type(path) == str:
@@ -118,63 +111,7 @@ class GaussianSplattingField(Field):
         points = np.asarray(pcd.points)
         num_points = points.shape[0]
 
-        CONSOLE.print("Number of points in OG point cloud : ", points.shape[0])
-
-        if occluded_rand_init:
-
-            print("Computing occluded voxels...")
-
-            voxel_size = 0.05
-            min_corner, dims = compute_grid_parameters(pcd, voxel_size)
-
-            total_size = np.prod(dims)
-            max_total_size = 1000000
-
-            if total_size > max_total_size:
-                print(f"Total size of grid is {total_size}. This is too large for shadow volume calculation.")
-
-                multiplier = (max_total_size / total_size) ** (1 / 3)
-
-                assert multiplier < 1, "Multiplier should be less than 1"
-
-                voxel_size = voxel_size / multiplier
-
-                min_corner, dims = compute_grid_parameters(pcd, voxel_size)
-
-                print("Multiplier : ", multiplier)
-                print("New voxel size : ", voxel_size)
-
-                print(f"Using voxel size of {voxel_size} and dims {dims}")
-                print(f"Total number of voxels: {np.prod(dims)}")
-
-            viewpoint = np.array([0.0, 0.0, 0.0])
-            self.occ_grid = point_cloud_to_occupancy_grid(pcd, voxel_size, min_corner, dims)
-
-            print("Occupancy grid created with dims : ", dims)
-
-            start = time.time()
-            occluded_voxels = find_occluded_voxels(self.occ_grid, viewpoint, min_corner, voxel_size)
-            end = time.time()
-
-            print("Time taken to find occluded voxels : ", end - start)
-            # print("Occluded voxel content", occluded_voxels.min(), occluded_voxels.max())
-
-            voxel_coords = np.argwhere(occluded_voxels > 0)
-            voxel_centers = voxel_coords * voxel_size + min_corner
-
-            print("Number of occluded voxels : ", voxel_centers.shape[0])
-
-            # Create a new point cloud at the voxel centers
-            pcd_new = o3d.geometry.PointCloud()
-            pcd_new.points = o3d.utility.Vector3dVector(voxel_centers)
-
-            # Gray color for the newpoints
-            pcd_new.colors = o3d.utility.Vector3dVector(np.ones((voxel_centers.shape[0], 3)) / 2)
-
-            # Combine the two points clouds
-            pcd = pcd + pcd_new
-
-        points = np.asarray(pcd.points)
+        CONSOLE.print("Number of points in OG point cloud : ", num_points)
 
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().to(device)
 
@@ -222,15 +159,7 @@ class GaussianSplattingField(Field):
         rots[:, 0] = 1
 
         opacities = torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device)
-
-        # Store the initial number of points used
-        if self.num_points_init is None:
-            del self.num_points_init
-            self.register_buffer("num_points_init", torch.tensor(num_points, device=self.device))
-
-        # Save the positions of the initial points
-        self.init_xyz = fused_point_cloud[: self.num_points_init]
-
+        
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(init_requires_grad))
         self._features_dc = nn.Parameter(
             features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(init_requires_grad)
@@ -247,28 +176,6 @@ class GaussianSplattingField(Field):
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
 
         self.active_sh_degree = self.max_sh_degree
-
-        self.add_retain_hooks()
-
-    # Clear the gradient for the num_points_init rows of parameters using hook
-    def add_retain_hooks(self):
-        return
-
-        # def retain_grad_hook(grad):
-
-        #     try:
-        #         grad = grad.clone()
-        #         grad[:self.num_points_init] = 0.0
-        #         return grad
-        #     except:
-        #         return grad
-
-        # self._xyz.register_hook(retain_grad_hook)
-        # self._features_dc.register_hook(retain_grad_hook)
-        # self._features_rest.register_hook(retain_grad_hook)
-        # self._scaling.register_hook(retain_grad_hook)
-        # self._rotation.register_hook(retain_grad_hook)
-        # self._opacity.register_hook(retain_grad_hook)
 
     @property
     def get_scaling(self):
@@ -453,43 +360,6 @@ class GaussianSplattingField(Field):
         self.denom = self.denom[valid_points_mask]
         # self.max_radii2D = self.max_radii2D[valid_points_mask]
 
-    def break_big_splats(self, optimizers, N=2):
-        n_init_points = self.get_xyz.shape[0]
-        # Extract points that satisfy the gradient condition
-
-        selected_pts_mask = self.scaling_inverse_activation(torch.max(self.get_scaling, dim=1).values) > -2
-
-        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
-        means = torch.zeros((stds.size(0), 3), device=self.device)
-        samples = torch.normal(mean=means, std=stds)
-        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
-        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
-        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N))
-        new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
-        new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
-        new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
-        new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
-
-        self.densification_postfix(
-            new_xyz,
-            new_features_dc,
-            new_features_rest,
-            new_opacity,
-            new_scaling,
-            new_rotation,
-            optimizers,
-        )
-
-        prune_filter = torch.cat(
-            (
-                selected_pts_mask,
-                torch.zeros(N * selected_pts_mask.sum(), device=self.device, dtype=bool),
-            )
-        )
-        self.prune_points(prune_filter, optimizers)
-
-        return selected_pts_mask.sum().item()
-
     def densify_and_split(self, grads, grad_threshold, scene_extent, optimizers, N=2):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
@@ -621,8 +491,6 @@ class GaussianSplattingField(Field):
 
         torch.cuda.empty_cache()
 
-        self.add_retain_hooks()
-
         return {
             "new_points": split_new,
             # 'compact_new': compact_new,
@@ -639,8 +507,6 @@ class GaussianSplattingField(Field):
         self.prune_points(prune_mask, optimizers)
 
         torch.cuda.empty_cache()
-
-        self.add_retain_hooks()
 
         return {
             "pruned_points": prune_mask.sum().item(),
@@ -763,37 +629,6 @@ class GaussianSplattingField(Field):
 
         return 0
 
-        num_densified = 0
-        new_params_list = []
-
-        for i in range(K):
-            new_params = self.densify_by_compatnes_with_idx(idx[:, i], mark=mark, filter_scale=filter_scale)
-            new_params_list.append(new_params)
-
-        new_params = {}
-        for key in new_params_list[0].keys():
-            new_params[key] = torch.cat([p[key] for p in new_params_list], dim=0)
-        num_densified = new_params["xyz"].shape[0]
-
-        new_xyz = new_params["xyz"]
-        new_features_dc = new_params["f_dc"]
-        new_features_rest = new_params["f_rest"]
-        new_opacities = new_params["opacity"]
-        new_scaling = new_params["scaling"]
-        new_rotation = new_params["rotation"]
-
-        self.densification_postfix(
-            new_xyz,
-            new_features_dc,
-            new_features_rest,
-            new_opacities,
-            new_scaling,
-            new_rotation,
-            optimizers,
-        )
-
-        return num_densified
-
     # Functions that we don't care too much for
     def init_random(self, num_points=1000):
 
@@ -884,61 +719,6 @@ class GaussianSplattingField(Field):
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
         self.active_sh_degree = self.max_sh_degree
-
-    def backproject_and_combine(self, rgb, depth, mask, pose):
-        """
-        This function backprojects the RGBD image into a point cloud and combines it with the current point cloud
-
-        rgb: torch.Tensor of shape (3, H, W)
-        depth: torch.Tensor of shape (1, H, W)
-        mask: torch.Tensor of shape (1, H, W)
-        pose: torch.Tensor of shape (4, 4)
-        """
-
-        # set depth values outside mask to be very high (will get ignored )
-        depth[mask != 1] = torch.nan
-
-        rgb = rgb.clamp(0, 1)
-        rgbi = o3d.geometry.Image((rgb.cpu().contiguous().numpy() * 255).astype(np.uint8))
-        depthi = o3d.geometry.Image(depth.cpu().numpy())
-
-        # Create a RGBD image
-        rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            rgbi,
-            depthi,
-            depth_scale=1.0,
-            depth_trunc=1000.0,
-            convert_rgb_to_intensity=False,
-        )
-
-        # to do: not hardcode the intrinsics
-        # Create a 90 degree FOV intrinsics matrix
-        intrinsic_matrix = o3d.camera.PinholeCameraIntrinsic()
-        intrinsic_matrix.set_intrinsics(512, 512, 256.0, 256.0, 256.0, 256.0)
-
-        if pose.shape[0] == 3 and pose.shape[1] == 4:
-            pose = np.vstack((pose, np.array([0, 0, 0, 1])))
-
-        # pose is w2c in opengl convention
-        pose = np.linalg.inv(pose)
-
-        # flip y and z axis
-        pose[1, :] = -pose[1, :]
-        pose[2, :] = -pose[2, :]
-
-        # Create a point cloud from the RGBD image
-        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
-            rgbd_image,
-            intrinsic_matrix,
-            pose,
-        )
-
-        pcd.colors = o3d.utility.Vector3dVector(np.asarray(pcd.colors) / 255)
-
-        # Combine the base point cloud with the new point cloud
-        self.load_pcd(self.base_pcd + pcd)
-
-        return pcd
 
     def load_from_ckpt(self, path):
 

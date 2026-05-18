@@ -154,7 +154,6 @@ class GaussianSplatting(Model):
 
         self.gaussian_model.load_pcd(
             os.path.join(self.config.pcd_path),
-            occluded_rand_init=False,
             device="cuda",
             use_sigmoid=False,
         )

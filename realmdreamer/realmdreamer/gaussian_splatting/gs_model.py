@@ -89,6 +89,10 @@ class GaussianSplattingModelConfig(ModelConfig):
     gaussian_model: GaussianSplattingFieldConfig = GaussianSplattingFieldConfig()
     """Config for the Gaussian model."""
     
+    # === Mode Switch ===
+    is_distillation: bool = False
+    """If True, runs ControlNet distillation. If False, runs standard 3DGS reconstruction."""
+    
     deblur_enabled: bool = False
     """Whether to enable per-image learnable deblurring kernels."""
     
@@ -272,9 +276,6 @@ class GaussianSplattingModelConfig(ModelConfig):
     inference_only: bool = False
     """Whether to only use the model for inference"""
 
-    occluded_rand_init: bool = True
-    """Whether to occlude the point cloud for random initialization"""
-
 
 class PipelineParams:
     def __init__(self):
@@ -304,8 +305,8 @@ class GaussianSplatting(Model):
 
         self.config = config
 
-        if not self.config.inference_only:
-            self.guidance.to(self.device)
+        # if not self.config.inference_only:
+        #     self.guidance.to(self.device)
 
         self.gaussian_model.to(self.device)
         self.gaussian_model.xyz_gradient_accum.to(self.device)
@@ -335,14 +336,10 @@ class GaussianSplatting(Model):
                 self.blur_kernels[:, :, center, center] = 1.0
         
 
-    def setup_diffusion(self, dreambooth_path=None):
-        if self.config.guidance == "controlnet_tile":
-            from realmdreamer.guidance.sd_controlnet_guidance import StableDiffusionControlNetGuidance
-            self.guidance = StableDiffusionControlNetGuidance(device="cuda")
-        else:
-            raise NotImplementedError("Only controlnet_tile is supported for this restoration pipeline.")
-            
-        self.depth_guidance = None # We officially removed Marigold/GeoWizard!
+    def setup_diffusion(self):
+        from realmdreamer.guidance.sd_controlnet_guidance import StableDiffusionControlNetGuidance
+        self.guidance = StableDiffusionControlNetGuidance(device="cuda")
+        self.diffusion_setup = True
 
     def populate_modules(self):
         super().populate_modules()
@@ -352,12 +349,10 @@ class GaussianSplatting(Model):
 
         self.gaussian_model.load_pcd(
             os.path.join(self.config.pcd_path),
-            occluded_rand_init=self.config.occluded_rand_init,
             device="cuda",
             use_sigmoid=self.config.use_sigmoid,
         )
-        # self.gaussian_model.init_random_from_pcd(os.path.join(self.config.pcd_path), occluded_rand_init=False)
-
+        
         self.gaussian_model.xyz_gradient_accum = torch.zeros((self.gaussian_model.get_xyz.shape[0], 1), device="cuda")
         self.gaussian_model.denom = torch.zeros((self.gaussian_model.get_xyz.shape[0], 1), device="cuda")
 
@@ -370,17 +365,10 @@ class GaussianSplatting(Model):
         
         self.ssim = MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0).to("cuda")
 
-        # Diffusion Guidance
-        self.diffusion_setup = True
-
-        if not self.config.load_dreambooth:
+        # Diffusion Guidance Setup (Only if needed)
+        self.diffusion_setup = False
+        if self.config.is_distillation:
             self.setup_diffusion()
-        else:
-
-            dreambooth_path = self.config.pcd_path.replace("pointcloud.ply", "dreambooth")
-            assert os.path.exists(dreambooth_path), f"Dreambooth path {dreambooth_path} does not exist"
-
-            self.setup_diffusion(dreambooth_path)
 
     @staticmethod
     def search_for_max_iteration(folder):
@@ -536,10 +524,6 @@ class GaussianSplatting(Model):
         param_groups["opacity"] = [self.gaussian_model._opacity]
         param_groups["scaling"] = [self.gaussian_model._scaling]
         param_groups["rotation"] = [self.gaussian_model._rotation]
-
-        if self.config.guidance == "vsd":
-            print("Adding guidance parameters to param_groups")
-            param_groups["guidance"] = list(self.guidance.parameters())
             
         if self.config.deblur_enabled:
             param_groups["deblur_kernels"] = [self.blur_kernels]
@@ -555,9 +539,6 @@ class GaussianSplatting(Model):
         params["opacity"] = self.gaussian_model._opacity
         params["scaling"] = self.gaussian_model._scaling
         params["rotation"] = self.gaussian_model._rotation
-
-        if self.config.guidance == "vsd":
-            params["guidance"] = list(self.guidance.parameters())
 
         # Convert dict to iterator
         params = params.items()
@@ -671,7 +652,7 @@ class GaussianSplatting(Model):
         # k_losses.ssim_loss returns (1 - SSIM), so it is a minimization objective
         ssim_loss = k_losses.ssim_loss(img_bchw, gt_bchw, window_size=11, reduction="mean")
         
-        lambda_gs_l1 = 0.7
+        lambda_gs_l1 = 0.8
 
         # 4. Standard 3DGS weighted combination
         total_loss = lambda_gs_l1 * l1_loss + (1-lambda_gs_l1) * ssim_loss
@@ -825,30 +806,30 @@ class GaussianSplatting(Model):
     
         
         # --- 4. THE DISTILLATION ANCHOR (Diffusion) ---
-        if self.training and step_ratio > self.config.start_diff_ratio:
-            # Pass scales down to guidance
-            self.guidance.cfg.controlnet_conditioning_scale =[
-                self.config.controlnet_tile_scale, 
-                self.config.controlnet_depth_scale
-            ]
-            self.guidance.cfg.ip_adapter_scale = self.config.ip_adapter_scale
+        # if self.training and step_ratio > self.config.start_diff_ratio:
+        #     # Pass scales down to guidance
+        #     self.guidance.cfg.controlnet_conditioning_scale =[
+        #         self.config.controlnet_tile_scale, 
+        #         self.config.controlnet_depth_scale
+        #     ]
+        #     self.guidance.cfg.ip_adapter_scale = self.config.ip_adapter_scale
             
-            # Pass SHARP render, GT RGB, and GT Depth to ControlNet
-            pseudo_gt_sharp_bchw = self.guidance.multi_step(
-                rgb=sharp_rendered_rgb_bhwc,
-                scan_rgb=image,
-                scan_depth=batch["depth_image"].permute(0, 3, 1, 2).to(self.device),
-                prompt=prompt,
-                current_step_ratio=step_ratio,
-            )
+        #     # Pass SHARP render, GT RGB, and GT Depth to ControlNet
+        #     pseudo_gt_sharp_bchw = self.guidance.multi_step(
+        #         rgb=sharp_rendered_rgb_bhwc,
+        #         scan_rgb=image,
+        #         scan_depth=batch["depth_image"].permute(0, 3, 1, 2).to(self.device),
+        #         prompt=prompt,
+        #         current_step_ratio=step_ratio,
+        #     )
             
-            # Ensure FP32 for loss computation
-            pseudo_gt_sharp_bchw = pseudo_gt_sharp_bchw.float()
-            misc["pseudo_gt"] = pseudo_gt_sharp_bchw
+        #     # Ensure FP32 for loss computation
+        #     pseudo_gt_sharp_bchw = pseudo_gt_sharp_bchw.float()
+        #     misc["pseudo_gt"] = pseudo_gt_sharp_bchw
             
-            # Pull the SHARP 3DGS render toward the Pseudo-GT
-            loss_dict["loss_distill_mse"] = current_lambda_mse * F.mse_loss(sharp_rendered_rgb_bchw, pseudo_gt_sharp_bchw)
-            loss_dict["loss_distill_lpips"] = current_lambda_lpips * self.lpips(sharp_rendered_rgb_bchw * 2 - 1, pseudo_gt_sharp_bchw * 2 - 1).mean()
+        #     # Pull the SHARP 3DGS render toward the Pseudo-GT
+        #     loss_dict["loss_distill_mse"] = current_lambda_mse * F.mse_loss(sharp_rendered_rgb_bchw, pseudo_gt_sharp_bchw)
+        #     loss_dict["loss_distill_lpips"] = current_lambda_lpips * self.lpips(sharp_rendered_rgb_bchw * 2 - 1, pseudo_gt_sharp_bchw * 2 - 1).mean()
 
         # Opaqueness Loss
         clamped_opacity = torch.clamp(self.gaussian_model.get_opacity, min=1e-5, max=1.0 - 1e-5)

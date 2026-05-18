@@ -21,7 +21,7 @@ ckpt_name="2026-05-07_215701"
 
 scene_folder_path="outputs/${scene_name}"
 command="ns-train realmdreamer --data "${scene_folder_path%/}" \
---project_name "RealmDreamer_Restoration" \
+--project_name "RealmDreamer_Reconstruction" \
 --experiment_name '${scene_name}' \
 --pipeline.prompt "${prompt}" \
 --vis wandb \

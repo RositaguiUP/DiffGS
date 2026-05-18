@@ -36,7 +36,6 @@ dummy_pcd_method = MethodSpecification(
             model=GaussianSplattingModelConfig(
                 gaussian_model=GaussianSplattingFieldConfig(),
                 inference_only=True,
-                occluded_rand_init=False,
             ),
         ),
         optimizers={},
